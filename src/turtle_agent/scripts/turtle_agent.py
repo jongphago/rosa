@@ -48,6 +48,7 @@ from rich.panel import Panel
 from rich.text import Text
 from ros_params import get_bool_param
 from static_world import load_static_world
+from turtle_control_runtime import run_turtle_control_agent
 
 from rosa import ROSA
 
@@ -451,7 +452,14 @@ if __name__ == "__main__":
     rospy.loginfo("PoseHub registered turtles: %s", ", ".join(registered_turtles))
     turtle_tools.configure_turtle_lifecycle_listener(pose_hub)
     try:
-        main(obstacle_store=obstacle_store, load_static_world_once=False)
+        agent_mode = rospy.get_param("~agent_mode", "single").strip().lower()
+        if agent_mode == "control":
+            run_turtle_control_agent(
+                obstacle_store=obstacle_store,
+                lifecycle_listener=pose_hub,
+            )
+        else:
+            main(obstacle_store=obstacle_store, load_static_world_once=False)
     finally:
         turtle_tools.configure_turtle_lifecycle_listener(None)
         pose_hub.stop()

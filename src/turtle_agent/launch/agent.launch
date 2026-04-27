@@ -3,6 +3,12 @@
     <arg name="static_obstacles_file" default="$(find turtle_agent)/config/static_obstacles_turtlesim.yaml" />
     <arg name="draw_static_world" default="true" />
     <arg name="world_builder_required" default="true" />
+    <arg name="agent_mode" default="single" />
+    <arg name="control_worker_count" default="2" />
+    <arg name="control_reset_turtlesim" default="false" />
+    <arg name="control_task_count" default="0" />
+    <arg name="control_task_timeout" default="0" />
+    <arg name="control_turtle_names" default="" />
 
     <node name="rosa_turtle_agent"
           pkg="turtle_agent"
@@ -15,5 +21,11 @@
         <param name="static_obstacles_file" value="$(arg static_obstacles_file)" />
         <param name="draw_static_world" value="$(arg draw_static_world)" />
         <param name="world_builder_required" value="$(arg world_builder_required)" />
+        <param name="agent_mode" value="$(arg agent_mode)" />
+        <param name="control_worker_count" value="$(arg control_worker_count)" />
+        <param name="control_reset_turtlesim" value="$(arg control_reset_turtlesim)" />
+        <param name="control_task_count" value="$(arg control_task_count)" />
+        <param name="control_task_timeout" value="$(arg control_task_timeout)" />
+        <param name="control_turtle_names" value="$(arg control_turtle_names)" />
     </node>
 </launch>
