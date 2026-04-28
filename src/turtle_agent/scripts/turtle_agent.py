@@ -15,11 +15,15 @@
 
 import asyncio
 import os
+from pathlib import Path
 import signal
 import sys
 import threading
+import time
+import uuid
 from datetime import datetime
-from typing import Optional
+import json
+from typing import Any, Dict, List, Optional, Tuple
 
 import dotenv
 import pyinputplus as pyip
@@ -28,11 +32,14 @@ import tools.obstacle as obstacle_tools
 import tools.turtle as turtle_tools
 from collision_event_sink import make_collision_event_sink
 from collision_monitor import CollisionMonitor
+from command_logger import CommandLogger
 from help import get_help
 from langchain.agents import Tool, tool
 
 # from langchain_ollama import ChatOllama
 from llm import get_llm
+from memory_converter import MemoryConverter
+from memory_prompting import build_memory_context, infer_query_context, load_long_term_records
 from obstacle_store import ObstacleStore
 from pose_hub import PoseHub
 from pose_logger import (
@@ -46,11 +53,10 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
+from rosa import ROSA
 from ros_params import get_bool_param
 from static_world import load_static_world
 from turtle_control_runtime import run_turtle_control_agent
-
-from rosa import ROSA
 
 
 def _maybe_attach_debugpy() -> None:
@@ -110,6 +116,23 @@ def cool_turtle_tool():
     return "This is a cool turtle tool! It doesn't do anything, but it's cool."
 
 
+def _normalize_tool_args(raw_input: Any) -> Dict[str, Any]:
+    """LangChain AgentAction.tool_input 을 JSON 직렬화 가능한 dict 로 맞춥니다."""
+    if isinstance(raw_input, dict):
+        return dict(raw_input)
+    if isinstance(raw_input, str):
+        try:
+            parsed = json.loads(raw_input)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+        return {"tool_input": raw_input}
+    if raw_input is None:
+        return {}
+    return {"tool_input": raw_input}
+
+
 class TurtleAgent(ROSA):
 
     def __init__(
@@ -117,6 +140,8 @@ class TurtleAgent(ROSA):
         streaming: bool = False,
         verbose: bool = True,
         obstacle_store: Optional[ObstacleStore] = None,
+        command_logger: Optional[CommandLogger] = None,
+        memory_converter: Optional[MemoryConverter] = None,
     ):
         self.__blacklist = ["master", "docker"]
         self._obstacle_store = obstacle_store or ObstacleStore()
@@ -132,6 +157,12 @@ class TurtleAgent(ROSA):
         # )
 
         self.__streaming = streaming
+        self._command_logger = command_logger or CommandLogger()
+        self._memory_converter = memory_converter or MemoryConverter()
+        self._turtle_id = rospy.get_param(
+            "~turtle_id", os.environ.get("TURTLE_TURTLE_ID", "turtle1")
+        )
+        self._memory_root = (Path(__file__).resolve().parent / "memory").resolve()
 
         # Another method for adding tools
         blast_off = Tool(
@@ -150,6 +181,8 @@ class TurtleAgent(ROSA):
             verbose=verbose,
             accumulate_chat_history=True,
             streaming=streaming,
+            return_intermediate_steps=True,
+            on_intermediate_steps=self._record_agent_tool_steps,
         )
 
         self.examples = [
@@ -166,6 +199,30 @@ class TurtleAgent(ROSA):
             "examples": lambda: self.submit(self.choose_example()),
             "clear": lambda: self.clear(),
         }
+
+    def _record_agent_tool_steps(self, intermediate_steps: List[Tuple[Any, Any]]) -> None:
+        """AgentExecutor intermediate_steps 에서 실제 호출된 도구 이름·인자를 command 로그에 남깁니다."""
+        if not intermediate_steps:
+            return
+        for pair in intermediate_steps:
+            try:
+                if not isinstance(pair, tuple) or len(pair) < 2:
+                    continue
+                action, observation = pair[0], pair[1]
+            except Exception:
+                continue
+            tool_name = getattr(action, "tool", None) or getattr(action, "tool_name", None)
+            if not tool_name:
+                continue
+            raw_input = getattr(action, "tool_input", None)
+            args = _normalize_tool_args(raw_input)
+            self._command_logger.log_skill(
+                self._turtle_id,
+                skill=str(tool_name),
+                args=args,
+                status="success",
+                result=str(observation)[:4000],
+            )
 
     def blast_off(self, input: str):
         return f"""
@@ -253,12 +310,59 @@ class TurtleAgent(ROSA):
                 continue
 
     async def submit(self, query: str):
+        query_ctx = infer_query_context(query)
+        long_records = load_long_term_records(self._memory_root, self._turtle_id)
+        memory_context, memory_hits = build_memory_context(query, long_records, top_k=2)
+        effective_query = (
+            f"{memory_context}\n\nUser query:\n{query}" if memory_context else query
+        )
+        rospy.loginfo(
+            "memory prompt: hits=%s experience_key=%s",
+            memory_hits,
+            query_ctx.get("experience_key", ""),
+        )
+        self._command_logger.log_intent(
+            self._turtle_id,
+            {
+                "task_family": str(query_ctx.get("task_family", "natural_language_query")),
+                "slots": query_ctx.get("slots", {}),
+                "natural_language": query,
+                "query": query,
+                "memory_hits": memory_hits,
+                "experience_key": query_ctx.get("experience_key", ""),
+            },
+        )
         if self.__streaming:
-            await self.stream_response(query)
+            response = await self.stream_response(effective_query)
         else:
-            self.print_response(query)
+            response = self.print_response(effective_query)
+        self._command_logger.log_skill(
+            self._turtle_id,
+            skill="rosa_response",
+            args={
+                "query": query,
+                "memory_hits": memory_hits,
+                "experience_key": query_ctx.get("experience_key", ""),
+            },
+            status="success",
+            result=str(response),
+        )
+        try:
+            conversion = self._memory_converter.convert_session(
+                date_str=self._command_logger.date_str,
+                session_id=self._command_logger.session_id,
+                turtle_id=self._turtle_id,
+                test_case_id=f"tc-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}",
+                write_long_term=False,
+            )
+            rospy.loginfo(
+                "memory conversion completed: short=%s",
+                conversion.get("short_term_written", 0),
+            )
+        except Exception as e:
+            rospy.logwarn("memory conversion skipped: %s", e)
 
-    def print_response(self, query: str):
+    def print_response(self, query: str) -> str:
         """
         Submit the query to the agent and print the response to the console.
 
@@ -269,8 +373,6 @@ class TurtleAgent(ROSA):
             None
         """
         console = Console()
-        content_panel = None
-
         try:
             with GracefulInterruptHandler():
                 response = self.invoke(query)
@@ -281,11 +383,12 @@ class TurtleAgent(ROSA):
                         Markdown(response), title="Final Response", border_style="green"
                     )
                     live.update(content_panel, refresh=True)
+                return response
         except KeyboardInterrupt:
             console.print("\n[yellow]Response interrupted.[/yellow]")
             raise
 
-    async def stream_response(self, query: str):
+    async def stream_response(self, query: str) -> str:
         """
         Stream the agent's response with rich formatting.
 
@@ -307,6 +410,8 @@ class TurtleAgent(ROSA):
 
         panel = Panel("", title="Streaming Response", border_style="green")
 
+        stream_tool_inputs_queue: List[Any] = []
+
         try:
             with GracefulInterruptHandler() as handler:
                 with Live(panel, console=console, auto_refresh=False) as live:
@@ -321,7 +426,21 @@ class TurtleAgent(ROSA):
                             content += event["content"]
                             panel.renderable = Markdown(content)
                             live.refresh()
-                        elif event["type"] in ["tool_start", "tool_end", "error"]:
+                        elif event["type"] == "tool_start":
+                            self.last_events.append(event)
+                            stream_tool_inputs_queue.append(event.get("input"))
+                        elif event["type"] == "tool_end":
+                            self.last_events.append(event)
+                            inp = stream_tool_inputs_queue.pop(0) if stream_tool_inputs_queue else None
+                            args = _normalize_tool_args(inp)
+                            self._command_logger.log_skill(
+                                self._turtle_id,
+                                skill=str(event.get("name", "unknown")),
+                                args=args,
+                                status="success",
+                                result=str(event.get("output", ""))[:4000],
+                            )
+                        elif event["type"] == "error":
                             self.last_events.append(event)
                         elif event["type"] == "final":
                             content = event["content"]
@@ -339,6 +458,7 @@ class TurtleAgent(ROSA):
                     self.command_handler["info"] = self.show_event_details
                 else:
                     self.command_handler.pop("info", None)
+                return content
         except KeyboardInterrupt:
             console.print("\n[yellow]Response interrupted.[/yellow]")
             raise
@@ -402,13 +522,20 @@ def main(
     dotenv.load_dotenv(dotenv.find_dotenv())
 
     streaming = rospy.get_param("~streaming", False)
+    turtle_id = rospy.get_param("~turtle_id", os.environ.get("TURTLE_TURTLE_ID", "turtle1"))
     if obstacle_store is None:
         obstacle_store = ObstacleStore()
     if load_static_world_once:
         load_static_world(obstacle_store)
 
+    command_logger = CommandLogger(session_id=pose_log_consumer.session_id)
+    memory_converter = MemoryConverter()
     turtle_agent = TurtleAgent(
-        verbose=False, streaming=streaming, obstacle_store=obstacle_store
+        verbose=False,
+        streaming=streaming,
+        obstacle_store=obstacle_store,
+        command_logger=command_logger,
+        memory_converter=memory_converter,
     )
 
     try:
@@ -418,6 +545,16 @@ def main(
     except Exception as e:
         print(f"\n[Error: {e}]")
         sys.exit(1)
+    finally:
+        try:
+            long_count = memory_converter.finalize_session(
+                session_id=command_logger.session_id,
+                turtle_id=str(turtle_id),
+            )
+            rospy.loginfo("long-term finalize completed: written=%s", long_count)
+        except Exception as e:
+            rospy.logwarn("long-term finalize skipped: %s", e)
+        command_logger.close()
 
 
 if __name__ == "__main__":
