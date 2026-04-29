@@ -252,8 +252,7 @@ class MemoryConverter:
     ) -> int:
         short_rows = self._load_session_short_rows(session_id)
         batch = select_compression_batch(short_rows)
-        # Lower threshold so long-term can be updated during shorter iterative sessions.
-        if len(batch) < 3:
+        if len(batch) < 5:
             return 0
         long_rec = self.create_long_term_record(
             batch[:5],
