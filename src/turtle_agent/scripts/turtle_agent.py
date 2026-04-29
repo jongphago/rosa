@@ -420,12 +420,13 @@ class TurtleAgent(ROSA):
                 session_id=self._command_logger.session_id,
                 turtle_id=self._turtle_id,
                 test_case_id=f"tc-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}",
-                write_long_term=False,
+                write_long_term=True,
                 mode=self._agent_mode,
             )
             rospy.loginfo(
-                "memory conversion completed: short=%s",
+                "memory conversion completed: short=%s long=%s",
                 conversion.get("short_term_written", 0),
+                conversion.get("long_term_written", 0),
             )
         except Exception as e:
             rospy.logwarn("memory conversion skipped: %s", e)
