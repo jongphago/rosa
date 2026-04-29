@@ -19,6 +19,8 @@ import rospy
 from geometry_msgs.msg import Twist
 from langchain.agents import tool
 from std_srvs.srv import Empty
+from static_world import load_static_world
+import tools.obstacle as obstacle_tools
 from turtle_lifecycle import (
     configure_turtle_lifecycle_listener,
     notify_turtle_killed,
@@ -372,7 +374,12 @@ def stop_turtle(name: str):
 @tool
 def reset_turtlesim():
     """
-    Resets the turtlesim, removes all turtles, clears any markings, and creates a new default turtle at the center.
+    Reset turtlesim and restore static-world initial state.
+
+    This now does:
+    1) turtlesim /reset (clears drawing + returns default turtle behavior)
+    2) static map reload + redraw
+    3) initial_turtles respawn/reposition from static map config
     """
     try:
         rospy.wait_for_service("/reset", timeout=5)
@@ -391,9 +398,21 @@ def reset_turtlesim():
             f"/turtle1/cmd_vel", Twist, queue_size=10
         )
 
-        return "Successfully reset the turtlesim environment. Ignore all previous commands, failures, and goals."
+        store = obstacle_tools.get_configured_obstacle_store()
+        if store is None:
+            return (
+                "Reset completed, but static world restore was skipped because "
+                "ObstacleStore is not configured."
+            )
+        load_static_world(store)
+        return (
+            "Successfully reset turtlesim and restored static world from map "
+            "(obstacles + initial turtles)."
+        )
     except rospy.ServiceException as e:
         return f"Failed to reset the turtlesim environment: {e}"
+    except Exception as e:
+        return f"Reset succeeded but static world restore failed: {e}"
 
 
 @tool
