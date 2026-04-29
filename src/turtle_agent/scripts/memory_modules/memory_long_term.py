@@ -218,6 +218,7 @@ def collect_collision_evidence(short_term_batch: List[Dict[str, Any]]) -> Dict[s
     collision_events = 0
     collision_enter_count = 0
     collision_obstacles: set[str] = set()
+    collision_temporary_obstacles: set[str] = set()
     seen_fp: set[Tuple[Any, ...]] = set()
     for short in short_term_batch:
         for event in short_collision_events(short):
@@ -245,12 +246,26 @@ def collect_collision_evidence(short_term_batch: List[Dict[str, Any]]) -> Dict[s
                 or event.get("name")
                 or event.get("obstacle_name")
             )
+            # a/b/c/d-point 같은 경유 지점 마커는 long-term 충돌 evidence에서 제외한다.
+            if obstacle and str(obstacle).strip().lower().endswith("-point"):
+                continue
             if obstacle:
-                collision_obstacles.add(str(obstacle))
+                obstacle_name = str(obstacle)
+                collision_obstacles.add(obstacle_name)
+                details = event.get("details", {})
+                details_kind = (
+                    str(details.get("obstacle_kind", "")).lower()
+                    if isinstance(details, dict)
+                    else ""
+                )
+                obstacle_kind = str(event.get("obstacle_kind", "")).lower()
+                if details_kind == "temporary" or obstacle_kind == "temporary":
+                    collision_temporary_obstacles.add(obstacle_name)
     return {
         "collision_events": collision_events,
         "collision_enter_count": collision_enter_count,
         "collision_obstacles": sorted(collision_obstacles),
+        "collision_temporary_obstacles": sorted(collision_temporary_obstacles),
     }
 
 
@@ -297,7 +312,8 @@ def fallback_lessons_lines(
     action_trace: List[Dict[str, Any]],
 ) -> List[str]:
     enters = int(collision_ev.get("collision_enter_count", 0))
-    obstacles = collision_ev.get("collision_obstacles") or []
+    temporary_obstacles = collision_ev.get("collision_temporary_obstacles") or []
+    obstacles = temporary_obstacles or collision_ev.get("collision_obstacles") or []
     obs_txt = ", ".join(str(x) for x in obstacles[:5]) if obstacles else "없음"
     line1 = (
         f"이번 세션의 주요 목표는 「{first_goal[:120]}」이며 "
@@ -366,7 +382,7 @@ def summarize_lessons_with_llm(
             "- 단기 기록에서 실제로 나타난 목표·행동·충돌·(장애물 geometry)만 근거로 씁니다. 추측은 최소화합니다.\n"
             "- 출력은 반드시 3문장 구성으로 하며, 각 문장은 한 줄에 하나씩입니다.\n"
             "- 1번째 문장: 충돌이 발생한 장애물 위치(geometry 요약)를 명시합니다.\n"
-            "- 2번째 문장: 충돌 진입 횟수와 관련 장애물 식별자(예: wet-top)를 명시합니다.\n"
+            "- 2번째 문장: 충돌 진입 횟수와 temporary 유형 장애물 식별자를 명시합니다.\n"
             "- 3번째 문장: 다음 실행에서 그 위치/상황을 피하거나 더 짧게 분절해 재계획하는 조심점을 1개 제시합니다.\n"
             "- 반드시 금지: '모든 도구 단계가 성공적으로 끝났습니다', '성공적으로 완료', '도구 호출이 있었으며', '총 N개의 도구' 같은 문구를 포함하지 마세요.\n"
             "- 반드시 금지: tool step 성공/실패(예: all_success) 전반을 설명하려는 문장을 쓰지 마세요.\n"
@@ -543,6 +559,7 @@ def create_long_term_record(
                 "collision_events": collision_ev["collision_events"],
                 "collision_enter_count": collision_ev["collision_enter_count"],
                 "collision_obstacles": collision_ev["collision_obstacles"],
+                "collision_temporary_obstacles": collision_ev["collision_temporary_obstacles"],
                 # (B) now: obstacle geometry 요약으로 제공.
                 # (A) later: collision_hotspots 필드를 추가로 채워도(또는 값만 교체해도) 프롬프트는 둘 다 확인하도록 구성할 예정입니다.
                 "collision_obstacle_geometries": collision_obstacle_geometries,

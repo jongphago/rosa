@@ -255,7 +255,7 @@ class MemoryConverter:
         if len(batch) < 5:
             return 0
         long_rec = self.create_long_term_record(
-            batch[:5],
+            batch,
             session_id,
             turtle_id,
             obstacle_store=obstacle_store,
