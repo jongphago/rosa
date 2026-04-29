@@ -107,7 +107,9 @@ class CollisionMonitor:
             pose, _ = poses[turtle_name]
             tx, ty = _pose_xy(pose)
             for obstacle in obstacles:
-                if obstacle.kind == "turtle":
+                # 정책: turtle-obstacle 충돌 감지는 temporary 장애물만 대상으로 한다.
+                # static/turtle kind는 충돌로 인식하지 않는다.
+                if obstacle.kind != "temporary":
                     continue
                 if _turtle_hits_obstacle(tx, ty, self._turtle_radius, obstacle):
                     key = ("turtle_obstacle", turtle_name, obstacle.id)
