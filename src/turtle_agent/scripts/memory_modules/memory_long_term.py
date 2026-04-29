@@ -258,9 +258,9 @@ def lessons_context_payload(
     short_term_batch: List[Dict[str, Any]],
     *,
     collision_ev: Dict[str, Any],
+    collision_obstacle_geometries: List[str],
     task_family: str,
     action_trace: List[Dict[str, Any]],
-    all_success: bool,
     first_goal: str,
     queries: List[str],
 ) -> Dict[str, Any]:
@@ -282,17 +282,18 @@ def lessons_context_payload(
         "task_family": task_family,
         "goals": goals,
         "collision": dict(collision_ev),
+        # 장애물 geometry/좌표 요약을 lessons 생성에 함께 제공(최소 텍스트)
+        "collision_obstacle_geometries": collision_obstacle_geometries[:8],
         "skills_used": skills_used[:40],
-        "all_tool_steps_succeeded": all_success,
     }
 
 
 def fallback_lessons_lines(
     *,
     collision_ev: Dict[str, Any],
+    collision_obstacle_geometries: List[str],
     task_family: str,
     first_goal: str,
-    all_success: bool,
     action_trace: List[Dict[str, Any]],
 ) -> List[str]:
     enters = int(collision_ev.get("collision_enter_count", 0))
@@ -309,9 +310,14 @@ def fallback_lessons_lines(
         )
     else:
         line2 = "기록된 충돌 진입은 없었고, 주행 중 장애물 관통 이벤트도 집계되지 않았습니다."
-    n_tools = len(action_trace)
-    ok = "모든 도구 단계가 성공으로 끝났습니다." if all_success else "일부 단계에서 실패가 있었습니다."
-    line3 = f"총 {n_tools}개의 도구 호출이 있었으며, {ok}"
+    # (중요) 도구 성공 여부/호출 수 같은 문구는 lessons에서 제거하고,
+    # 장애물 위치(geometry) 기반으로 다음 행동 조심점을 더 직접적으로 전달합니다.
+    geom_tail = ""
+    if collision_obstacle_geometries:
+        geom_tail = f"충돌이 발생한 장애물 위치는 {collision_obstacle_geometries[0]} 부근입니다."
+    else:
+        geom_tail = "충돌이 발생한 장애물 위치는 식별은 되었지만 좌표/형상 정보가 제한적입니다."
+    line3 = geom_tail
     return [line1, line2, line3]
 
 
@@ -319,17 +325,17 @@ def summarize_lessons_with_llm(
     short_term_batch: List[Dict[str, Any]],
     *,
     collision_ev: Dict[str, Any],
+    collision_obstacle_geometries: List[str],
     task_family: str,
     action_trace: List[Dict[str, Any]],
-    all_success: bool,
     first_goal: str,
     queries: List[str],
 ) -> List[str]:
     fb = fallback_lessons_lines(
         collision_ev=collision_ev,
+        collision_obstacle_geometries=collision_obstacle_geometries,
         task_family=task_family,
         first_goal=first_goal or "(미상)",
-        all_success=all_success,
         action_trace=action_trace,
     )
     if os.getenv("MEMORY_LESSONS_LLM", "1").strip().lower() in ("0", "false", "no", "off"):
@@ -338,9 +344,9 @@ def summarize_lessons_with_llm(
     payload = lessons_context_payload(
         short_term_batch,
         collision_ev=collision_ev,
+        collision_obstacle_geometries=collision_obstacle_geometries,
         task_family=task_family,
         action_trace=action_trace,
-        all_success=all_success,
         first_goal=first_goal,
         queries=queries,
     )
@@ -357,8 +363,14 @@ def summarize_lessons_with_llm(
             "당신은 turtle_agent의 단기 메모리(short-term) 요약을 읽고 "
             "같은 세션에서 다음에 활용할 교훈만 추립니다.\n\n"
             "규칙:\n"
-            "- 단기 기록에서 실제로 나타난 목표·행동·충돌·성공 여부만 근거로 씁니다. 추측은 최소화합니다.\n"
-            "- 정확히 세 문장만 출력합니다. 각 문장은 한 줄에 하나씩입니다.\n"
+            "- 단기 기록에서 실제로 나타난 목표·행동·충돌·(장애물 geometry)만 근거로 씁니다. 추측은 최소화합니다.\n"
+            "- 출력은 반드시 3문장 구성으로 하며, 각 문장은 한 줄에 하나씩입니다.\n"
+            "- 1번째 문장: 충돌이 발생한 장애물 위치(geometry 요약)를 명시합니다.\n"
+            "- 2번째 문장: 충돌 진입 횟수와 관련 장애물 식별자(예: wet-top)를 명시합니다.\n"
+            "- 3번째 문장: 다음 실행에서 그 위치/상황을 피하거나 더 짧게 분절해 재계획하는 조심점을 1개 제시합니다.\n"
+            "- 반드시 금지: '모든 도구 단계가 성공적으로 끝났습니다', '성공적으로 완료', '도구 호출이 있었으며', '총 N개의 도구' 같은 문구를 포함하지 마세요.\n"
+            "- 반드시 금지: tool step 성공/실패(예: all_success) 전반을 설명하려는 문장을 쓰지 마세요.\n"
+            "- 정확히 세 문장만 출력합니다. (다른 부가 문장/라벨 금지)\n"
             "- 번호, 글머리표, 따옴표 장식 없이 평문만 사용합니다.\n"
             "- 한국어로 작성합니다.\n\n"
             "입력 요약(JSON):\n"
@@ -382,6 +394,7 @@ def create_long_term_record(
     short_term_batch: List[Dict[str, Any]],
     session_id: str,
     turtle_id: str,
+    obstacle_store: Optional[Any] = None,
 ) -> Dict[str, Any]:
     first_goal = short_goal_text(short_term_batch[0])
     queries = [str(short_goal_text(short)).strip() for short in short_term_batch if str(short_goal_text(short)).strip()]
@@ -403,12 +416,86 @@ def create_long_term_record(
     skill_sequence = [str(item.get("skill", "")) for item in action_trace if item.get("skill")]
     task_family, slots = extract_context_from_action_trace(action_trace, first_goal)
     collision_ev = collect_collision_evidence(short_term_batch)
+
+    def _geometry_to_compact_string(geometry: Any) -> str:
+        """
+        obstacle_store geometry를 프롬프트에 넣기 좋은 짧은 문자열로 축약합니다.
+
+        - circle: circle(cx, cy, r)
+        - aabb: aabb(min_x, min_y, max_x, max_y)
+        - segments: segments(n=..., bbox=(...))
+        """
+        if geometry is None:
+            return "unknown_geometry"
+
+        if hasattr(geometry, "cx") and hasattr(geometry, "cy") and hasattr(geometry, "r"):
+            try:
+                return (
+                    f"circle(cx={float(geometry.cx):.2f},"
+                    f"cy={float(geometry.cy):.2f},"
+                    f"r={float(geometry.r):.2f})"
+                )
+            except Exception:
+                return f"circle(type={type(geometry).__name__})"
+
+        if (
+            hasattr(geometry, "min_x")
+            and hasattr(geometry, "min_y")
+            and hasattr(geometry, "max_x")
+            and hasattr(geometry, "max_y")
+        ):
+            try:
+                return (
+                    f"aabb(min_x={float(geometry.min_x):.2f},"
+                    f"min_y={float(geometry.min_y):.2f},"
+                    f"max_x={float(geometry.max_x):.2f},"
+                    f"max_y={float(geometry.max_y):.2f})"
+                )
+            except Exception:
+                return f"aabb(type={type(geometry).__name__})"
+
+        if hasattr(geometry, "segments"):
+            try:
+                segments = list(getattr(geometry, "segments") or [])
+                n = len(segments)
+                xs: List[float] = []
+                ys: List[float] = []
+                for seg in segments:
+                    (x1, y1), (x2, y2) = seg
+                    xs.extend([float(x1), float(x2)])
+                    ys.extend([float(y1), float(y2)])
+                if xs and ys:
+                    bbox = (
+                        f"bbox=({min(xs):.2f},{min(ys):.2f})-({max(xs):.2f},{max(ys):.2f})"
+                    )
+                else:
+                    bbox = "bbox=unknown"
+                return f"segments(n={n},{bbox})"
+            except Exception:
+                return f"segments(type={type(geometry).__name__})"
+
+        return f"unknown_geometry(type={type(geometry).__name__})"
+
+    collision_obstacles = collision_ev.get("collision_obstacles") or []
+    collision_obstacle_geometries: List[str] = []
+    if obstacle_store is not None and collision_obstacles:
+        # Geometry는 프롬프트 길이를 위해 일부만 제공합니다.
+        for oid in collision_obstacles[:4]:
+            try:
+                ob = obstacle_store.get(oid)
+            except Exception:
+                ob = None
+            if ob is None:
+                continue
+            geometry = getattr(ob, "geometry", None)
+            geom_str = _geometry_to_compact_string(geometry)
+            collision_obstacle_geometries.append(f"{oid}:{geom_str}")
     lessons_lines = summarize_lessons_with_llm(
         short_term_batch,
         collision_ev=collision_ev,
+        collision_obstacle_geometries=collision_obstacle_geometries,
         task_family=task_family,
         action_trace=action_trace,
-        all_success=all_success,
         first_goal=str(first_goal or ""),
         queries=queries,
     )
@@ -456,6 +543,10 @@ def create_long_term_record(
                 "collision_events": collision_ev["collision_events"],
                 "collision_enter_count": collision_ev["collision_enter_count"],
                 "collision_obstacles": collision_ev["collision_obstacles"],
+                # (B) now: obstacle geometry 요약으로 제공.
+                # (A) later: collision_hotspots 필드를 추가로 채워도(또는 값만 교체해도) 프롬프트는 둘 다 확인하도록 구성할 예정입니다.
+                "collision_obstacle_geometries": collision_obstacle_geometries,
+                "collision_hotspots": [],
             },
             "lessons": lessons_lines,
         },

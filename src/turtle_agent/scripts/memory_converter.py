@@ -243,12 +243,23 @@ class MemoryConverter:
             rows.extend(read_jsonl(path))
         return rows
 
-    def finalize_session(self, *, session_id: str, turtle_id: str) -> int:
+    def finalize_session(
+        self,
+        *,
+        session_id: str,
+        turtle_id: str,
+        obstacle_store: Optional[Any] = None,
+    ) -> int:
         short_rows = self._load_session_short_rows(session_id)
         batch = select_compression_batch(short_rows)
         if len(batch) < 5:
             return 0
-        long_rec = self.create_long_term_record(batch[:5], session_id, turtle_id)
+        long_rec = self.create_long_term_record(
+            batch[:5],
+            session_id,
+            turtle_id,
+            obstacle_store=obstacle_store,
+        )
         long_path = build_long_term_path(self._memory_root, session_id)
         append_jsonl(long_path, long_rec)
         return 1
@@ -258,8 +269,14 @@ class MemoryConverter:
         short_term_batch: List[Dict[str, Any]],
         session_id: str,
         turtle_id: str,
+        obstacle_store: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        return create_long_term_record(short_term_batch, session_id, turtle_id)
+        return create_long_term_record(
+            short_term_batch,
+            session_id,
+            turtle_id,
+            obstacle_store=obstacle_store,
+        )
 
     def _build_compressed_long_record(
         self,

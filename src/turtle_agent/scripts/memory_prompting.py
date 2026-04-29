@@ -231,17 +231,56 @@ def build_memory_context(query: str, records: List[Dict[str, Any]], top_k: int =
         evidence = payload.get("evidence", {})
         collisions = _safe_int(evidence.get("collision_enter_count"), 0)
         success_rate = _safe_float(evidence.get("success_rate"))
+
+        collision_obstacles = evidence.get("collision_obstacles") or []
+        obstacle_ids = (
+            ", ".join(str(x) for x in collision_obstacles[:3]) if collision_obstacles else "없음"
+        )
+
+        collision_hotspots = evidence.get("collision_hotspots") or []
+        collision_obstacle_geometries = evidence.get("collision_obstacle_geometries") or []
+        location_tail = ""
+        if isinstance(collision_hotspots, list) and collision_hotspots:
+            location_tail = f" / collision_hotspots={collision_hotspots[:2]}"
+        elif isinstance(collision_obstacle_geometries, list) and collision_obstacle_geometries:
+            location_tail = f" / collision_obstacle_geometries={collision_obstacle_geometries[:2]}"
+
+        goal_snippet = goal_text[:60]
         lines.append(
-            f"{idx}. score={score} quality={quality} goal={goal_text[:120]} / collision_enter_count={collisions} / success_rate={success_rate}"
+            f"{idx}. goal={goal_snippet} / collision_enter_count={collisions} / collision_obstacles={obstacle_ids} / success_rate={success_rate}{location_tail}"
         )
         raw_lessons = payload.get("lessons")
         if isinstance(raw_lessons, list):
+            kept_lessons: List[str] = []
             for lesson in raw_lessons:
-                if isinstance(lesson, str) and lesson.strip():
-                    if quality == "low":
-                        dont_lines.append(f"[memory {idx}] {lesson.strip()}")
-                    else:
-                        do_lines.append(f"[memory {idx}] {lesson.strip()}")
+                if not (isinstance(lesson, str) and lesson.strip()):
+                    continue
+                # (즉시 적용 안전장치) 이미 저장된 lessons에 남아있는
+                # 도구 성공/호출 수 관련 문구를 프롬프트에 섞지 않도록 제거합니다.
+                forbidden_substrings = (
+                    "모든 도구 단계가 성공적으로 끝났습니다",
+                    "성공적으로 완료",
+                    "도구 호출이 있었으며",
+                    "개의 도구 호출",
+                    "총 ",
+                )
+                if any(fs in lesson for fs in forbidden_substrings):
+                    continue
+                kept_lessons.append(lesson.strip())
+
+            # (요구 반영) evidence의 장애물 geometry가 있으면,
+            # lessons에서 위치 문장이 빠져도 합성해서 넣습니다.
+            if isinstance(collision_obstacle_geometries, list) and collision_obstacle_geometries:
+                geom0 = str(collision_obstacle_geometries[0])
+                loc_sentence = f"충돌이 발생한 장애물 위치는 {geom0} 부근입니다."
+                if not any(("장애물 위치" in l) or (geom0 in l) for l in kept_lessons):
+                    kept_lessons.insert(0, loc_sentence)
+
+            for lesson in kept_lessons:
+                if quality == "low":
+                    dont_lines.append(f"[memory {idx}] {lesson}")
+                else:
+                    do_lines.append(f"[memory {idx}] {lesson}")
     policy_lines = ["MUST: Use selected memory as execution policy, not commentary."]
     if query_ctx.get("task_family") == "navigate":
         policy_lines.append("MUST: Avoid single long straight moves when uncertainty exists.")

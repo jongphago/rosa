@@ -558,6 +558,7 @@ def main(
             long_count = memory_converter.finalize_session(
                 session_id=command_logger.session_id,
                 turtle_id=str(turtle_id),
+                obstacle_store=obstacle_store,
             )
             rospy.loginfo("long-term finalize completed: written=%s", long_count)
         except Exception as e:
