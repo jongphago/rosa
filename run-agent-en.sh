@@ -38,7 +38,7 @@ fi
 if command -v rlwrap >/dev/null 2>&1; then
   rlwrap -cAr roslaunch /app/src/turtle_agent/launch/agent.launch streaming:=${STREAMING}
 else
-  echo "[WARN] rlwrap unavailable; arrow-key editing may still be broken."
+  echo '[WARN] rlwrap unavailable; arrow-key editing may still be broken.'
   roslaunch /app/src/turtle_agent/launch/agent.launch streaming:=${STREAMING}
 fi
 "
