@@ -67,6 +67,18 @@ def _filter_collision_rows_for_turtle(
     out: List[Dict[str, Any]] = []
     for row in rows:
         turtles = row.get("turtles")
+        details = row.get("details") if isinstance(row.get("details"), dict) else {}
+        obstacle_kind = row.get("obstacle_kind")
+        if obstacle_kind is None:
+            obstacle_kind = details.get("obstacle_kind")
+        kind = str(obstacle_kind or "").strip().lower()
+
+        # 세션 단위 위험요인 반영을 위해 temporary 장애물 충돌은
+        # 제어 turtle_id와 무관하게 short-term evidence에 포함한다.
+        if kind == "temporary":
+            out.append(row)
+            continue
+
         if not turtles:
             out.append(row)
             continue
