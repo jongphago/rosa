@@ -48,6 +48,11 @@ def configure_obstacle_store(store: ObstacleStore) -> None:
     _STORE = store
 
 
+def get_configured_obstacle_store() -> Optional[ObstacleStore]:
+    """Return currently configured in-process ObstacleStore, if any."""
+    return _STORE
+
+
 def _require_store() -> ObstacleStore:
     if _STORE is None:
         raise ObstacleToolError("ObstacleStore is not configured.")
