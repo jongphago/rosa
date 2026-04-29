@@ -97,6 +97,93 @@ class TestObstacleTools(unittest.TestCase):
         listed = json.loads(obstacle_tools.list_obstacles.invoke({}))
         self.assertEqual(listed["obstacles"], [])
 
+    def test_check_path_blocks_temporary_aabb_crossing(self):
+        obstacle_tools.add_obstacle.invoke(
+            {
+                "obstacle_id": "wet",
+                "geometry_json": json.dumps(
+                    {"type": "aabb", "min_x": 5, "min_y": 4, "max_x": 7, "max_y": 6}
+                ),
+                "kind": "temporary",
+                "ttl_seconds": 60,
+            }
+        )
+
+        result = json.loads(
+            obstacle_tools.check_path_against_obstacles.invoke(
+                {
+                    "x1": 1,
+                    "y1": 5,
+                    "x2": 10,
+                    "y2": 5,
+                    "turtle_radius": 0.5,
+                    "safety_margin": 0.2,
+                }
+            )
+        )
+
+        self.assertFalse(result["safe"])
+        self.assertEqual(result["blocked_by"][0]["id"], "wet")
+        self.assertEqual(result["blocked_by"][0]["kind"], "temporary")
+
+    def test_check_path_allows_detour_around_temporary_aabb(self):
+        obstacle_tools.add_obstacle.invoke(
+            {
+                "obstacle_id": "wet",
+                "geometry_json": json.dumps(
+                    {"type": "aabb", "min_x": 5, "min_y": 4, "max_x": 7, "max_y": 6}
+                ),
+                "kind": "temporary",
+                "ttl_seconds": 60,
+            }
+        )
+
+        result = json.loads(
+            obstacle_tools.check_path_against_obstacles.invoke(
+                {
+                    "x1": 1,
+                    "y1": 3.0,
+                    "x2": 10,
+                    "y2": 3.0,
+                    "turtle_radius": 0.5,
+                    "safety_margin": 0.2,
+                }
+            )
+        )
+
+        self.assertTrue(result["safe"])
+        self.assertEqual(result["blocked_by"], [])
+
+    def test_check_path_ignores_static_by_default(self):
+        obstacle_tools.add_obstacle.invoke(
+            {
+                "obstacle_id": "marker",
+                "geometry_json": json.dumps({"type": "circle", "cx": 5, "cy": 5, "r": 1}),
+                "kind": "static",
+            }
+        )
+
+        default_result = json.loads(
+            obstacle_tools.check_path_against_obstacles.invoke(
+                {"x1": 1, "y1": 5, "x2": 10, "y2": 5}
+            )
+        )
+        with_static = json.loads(
+            obstacle_tools.check_path_against_obstacles.invoke(
+                {
+                    "x1": 1,
+                    "y1": 5,
+                    "x2": 10,
+                    "y2": 5,
+                    "obstacle_kinds": "temporary,static",
+                }
+            )
+        )
+
+        self.assertTrue(default_result["safe"])
+        self.assertFalse(with_static["safe"])
+        self.assertEqual(with_static["blocked_by"][0]["id"], "marker")
+
 
 if __name__ == "__main__":
     unittest.main()

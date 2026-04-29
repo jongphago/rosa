@@ -19,6 +19,8 @@ import rospy
 from geometry_msgs.msg import Twist
 from langchain.agents import tool
 from std_srvs.srv import Empty
+from static_world import load_static_world
+import tools.obstacle as obstacle_tools
 from turtle_lifecycle import (
     configure_turtle_lifecycle_listener,
     notify_turtle_killed,
@@ -38,6 +40,16 @@ def add_cmd_vel_pub(name: str, publisher: rospy.Publisher):
 def remove_cmd_vel_pub(name: str):
     global cmd_vel_pubs
     cmd_vel_pubs.pop(name, None)
+
+
+def get_or_create_cmd_vel_pub(name: str) -> rospy.Publisher:
+    """Return cmd_vel publisher for turtle, creating it on demand."""
+    global cmd_vel_pubs
+    pub = cmd_vel_pubs.get(name)
+    if pub is None:
+        pub = rospy.Publisher(f"/{name}/cmd_vel", Twist, queue_size=10)
+        cmd_vel_pubs[name] = pub
+    return pub
 
 
 # Add the default turtle1 publisher on startup
@@ -319,21 +331,30 @@ def publish_twist_to_cmd_vel(
 
     try:
         global cmd_vel_pubs
-        pub = cmd_vel_pubs[name]
+        pub = get_or_create_cmd_vel_pub(name)
 
-        for _ in range(steps):
+        # Publish continuously during each second-step to avoid undershooting.
+        publish_hz = 20
+        duration_sec = max(1.0, float(steps))
+        tick_count = max(1, int(duration_sec * publish_hz))
+        rate = rospy.Rate(publish_hz)
+        for _ in range(tick_count):
             pub.publish(vel)
-            rospy.sleep(1)
+            rate.sleep()
+
+        # Explicitly send a stop command so the turtle does not coast.
+        stop = Twist()
+        pub.publish(stop)
     except Exception as e:
         return f"Failed to publish {vel} to /{name}/cmd_vel: {e}"
-    finally:
-        current_pose = get_turtle_pose.invoke({"names": [name]})
-        return (
-            f"New Pose ({name}): x={current_pose[name].x}, y={current_pose[name].y}, "
-            f"theta={current_pose[name].theta} rads, "
-            f"linear_velocity={current_pose[name].linear_velocity}, "
-            f"angular_velocity={current_pose[name].angular_velocity}."
-        )
+
+    current_pose = get_turtle_pose.invoke({"names": [name]})
+    return (
+        f"New Pose ({name}): x={current_pose[name].x}, y={current_pose[name].y}, "
+        f"theta={current_pose[name].theta} rads, "
+        f"linear_velocity={current_pose[name].linear_velocity}, "
+        f"angular_velocity={current_pose[name].angular_velocity}."
+    )
 
 
 @tool
@@ -343,20 +364,32 @@ def stop_turtle(name: str):
 
     :param name: name of the turtle
     """
-    return publish_twist_to_cmd_vel.invoke(
-        {
-            "name": name,
-            "velocity": 0.0,
-            "lateral": 0.0,
-            "angle": 0.0,
-        }
-    )
+    name = name.replace("/", "")
+    try:
+        global cmd_vel_pubs
+        pub = get_or_create_cmd_vel_pub(name)
+        stop = Twist()
+        for _ in range(3):
+            pub.publish(stop)
+            rospy.sleep(0.05)
+        current_pose = get_turtle_pose.invoke({"names": [name]})
+        return (
+            f"Stopped {name} at x={current_pose[name].x}, y={current_pose[name].y}, "
+            f"theta={current_pose[name].theta}."
+        )
+    except Exception as e:
+        return f"Failed to stop {name}: {e}"
 
 
 @tool
 def reset_turtlesim():
     """
-    Resets the turtlesim, removes all turtles, clears any markings, and creates a new default turtle at the center.
+    Reset turtlesim and restore static-world initial state.
+
+    This now does:
+    1) turtlesim /reset (clears drawing + returns default turtle behavior)
+    2) static map reload + redraw
+    3) initial_turtles respawn/reposition from static map config
     """
     try:
         rospy.wait_for_service("/reset", timeout=5)
@@ -371,13 +404,26 @@ def reset_turtlesim():
         # Clear the cmd_vel publishers
         global cmd_vel_pubs
         cmd_vel_pubs.clear()
-        cmd_vel_pubs["turtle1"] = rospy.Publisher(
-            f"/turtle1/cmd_vel", Twist, queue_size=10
-        )
+        for turtle_name in ("turtle1", "turtle2", "turtle3"):
+            cmd_vel_pubs[turtle_name] = rospy.Publisher(
+                f"/{turtle_name}/cmd_vel", Twist, queue_size=10
+            )
 
-        return "Successfully reset the turtlesim environment. Ignore all previous commands, failures, and goals."
+        store = obstacle_tools.get_configured_obstacle_store()
+        if store is None:
+            return (
+                "Reset completed, but static world restore was skipped because "
+                "ObstacleStore is not configured."
+            )
+        load_static_world(store)
+        return (
+            "Successfully reset turtlesim and restored static world from map "
+            "(obstacles + initial turtles)."
+        )
     except rospy.ServiceException as e:
         return f"Failed to reset the turtlesim environment: {e}"
+    except Exception as e:
+        return f"Reset succeeded but static world restore failed: {e}"
 
 
 @tool
@@ -481,16 +527,51 @@ def draw_line_segment(name: str, x1: float, y1: float, x2: float, y2: float) -> 
     # Turn on pen
     set_pen.invoke({"name": name, "r": 0, "g": 0, "b": 0, "width": 2, "off": 0})
     
-    # Draw the line (angle=0 because heading is already set)
-    result = publish_twist_to_cmd_vel.invoke({
-        "name": name,
-        "velocity": distance,
-        "lateral": 0,
-        "angle": 0,
-        "steps": 1
-    })
-    
-    return f"Line drawn from ({x1},{y1}) to ({x2},{y2}). {result}"
+    # Draw in small chunks to avoid undershoot from one-shot long moves.
+    chunk_distance = 1.0
+    max_iterations = max(1, int(distance / chunk_distance) + 8)
+    last_result = ""
+    prev_remaining = None
+    for _ in range(max_iterations):
+        current_pose = get_turtle_pose.invoke({"names": [name]})
+        cx = float(current_pose[name].x)
+        cy = float(current_pose[name].y)
+        remaining = sqrt((x2 - cx) ** 2 + (y2 - cy) ** 2)
+        if remaining <= 0.2:
+            break
+
+        step = min(chunk_distance, remaining)
+        last_result = publish_twist_to_cmd_vel.invoke(
+            {
+                "name": name,
+                "velocity": step,
+                "lateral": 0,
+                "angle": 0,
+                "steps": 1,
+            }
+        )
+
+        # Abort if progress stalls to avoid infinite loops.
+        if prev_remaining is not None and remaining >= prev_remaining - 0.01:
+            break
+        prev_remaining = remaining
+
+    # Verify endpoint so interrupted/short moves are surfaced to the caller.
+    final_pose = get_turtle_pose.invoke({"names": [name]})
+    final_x = float(final_pose[name].x)
+    final_y = float(final_pose[name].y)
+    endpoint_error = sqrt((final_x - x2) ** 2 + (final_y - y2) ** 2)
+    if endpoint_error > 0.2:
+        return (
+            f"Line move incomplete from ({x1},{y1}) to ({x2},{y2}). "
+            f"Current pose=({final_x:.3f},{final_y:.3f}), error={endpoint_error:.3f}. "
+            f"Last move: {last_result}"
+        )
+
+    return (
+        f"Line drawn from ({x1},{y1}) to ({x2},{y2}). "
+        f"Final pose=({final_x:.3f},{final_y:.3f}), error={endpoint_error:.3f}."
+    )
 
 
 @tool

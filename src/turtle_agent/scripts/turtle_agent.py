@@ -162,7 +162,9 @@ class TurtleAgent(ROSA):
         self._turtle_id = rospy.get_param(
             "~turtle_id", os.environ.get("TURTLE_TURTLE_ID", "turtle1")
         )
+        self._agent_mode = str(rospy.get_param("~agent_mode", "single"))
         self._memory_root = (Path(__file__).resolve().parent / "memory").resolve()
+        self.last_user_query = ""
 
         # Another method for adding tools
         blast_off = Tool(
@@ -198,6 +200,7 @@ class TurtleAgent(ROSA):
             "help": lambda: self.submit(get_help(self.examples)),
             "examples": lambda: self.submit(self.choose_example()),
             "clear": lambda: self.clear(),
+            "reset": lambda: self.run_reset_command(),
         }
 
     def _record_agent_tool_steps(self, intermediate_steps: List[Tuple[Any, Any]]) -> None:
@@ -222,6 +225,19 @@ class TurtleAgent(ROSA):
                 args=args,
                 status="success",
                 result=str(observation)[:4000],
+            )
+            # Keep lightweight tool traces so `info` works in non-streaming mode as well.
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            self.last_events.append(
+                {"type": "tool_start", "name": str(tool_name), "input": args, "timestamp": ts}
+            )
+            self.last_events.append(
+                {
+                    "type": "tool_end",
+                    "name": str(tool_name),
+                    "output": str(observation)[:4000],
+                    "timestamp": ts,
+                }
             )
 
     def blast_off(self, input: str):
@@ -261,6 +277,9 @@ class TurtleAgent(ROSA):
         self.clear_chat()
         self.last_events = []
         self.command_handler.pop("info", None)
+        no_clear = os.environ.get("ROSA_NO_CLEAR", "").strip().lower()
+        if no_clear in ("1", "true", "yes", "on"):
+            return
         os.system("clear")
 
     def get_input(self, prompt: str):
@@ -309,15 +328,60 @@ class TurtleAgent(ROSA):
                 console.print(f"[red]Error: {e}[/red]")
                 continue
 
+    async def run_reset_command(self):
+        """Run reset tool directly without LLM interpretation."""
+        console = Console()
+        try:
+            result = turtle_tools.reset_turtlesim.invoke({})
+            self.last_user_query = "reset"
+            self.last_events = [
+                {
+                    "type": "tool_start",
+                    "name": "reset_turtlesim",
+                    "input": {},
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                },
+                {
+                    "type": "tool_end",
+                    "name": "reset_turtlesim",
+                    "output": str(result),
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                },
+            ]
+            self.command_handler["info"] = self.show_event_details
+            console.print(
+                Panel(
+                    Markdown(str(result) + "\n\nType `info` for reset execution details."),
+                    title="Reset Command",
+                    border_style="green",
+                )
+            )
+        except Exception as e:
+            self.last_events = [
+                {
+                    "type": "error",
+                    "content": f"reset command failed: {e}",
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                }
+            ]
+            self.command_handler["info"] = self.show_event_details
+            console.print(f"[red]reset command failed: {e}[/red]")
+
     async def submit(self, query: str):
+        self.last_user_query = query
+        self.last_events = []
         query_ctx = infer_query_context(query)
-        long_records = load_long_term_records(self._memory_root, self._turtle_id)
-        memory_context, memory_hits = build_memory_context(query, long_records, top_k=2)
+        memory_context = ""
+        memory_hits = 0
+        if self._agent_mode.strip().lower() == "single":
+            long_records = load_long_term_records(self._memory_root, self._turtle_id)
+            memory_context, memory_hits = build_memory_context(query, long_records, top_k=3)
         effective_query = (
             f"{memory_context}\n\nUser query:\n{query}" if memory_context else query
         )
         rospy.loginfo(
-            "memory prompt: hits=%s experience_key=%s",
+            "memory prompt: mode=%s hits=%s experience_key=%s",
+            self._agent_mode,
             memory_hits,
             query_ctx.get("experience_key", ""),
         )
@@ -336,6 +400,10 @@ class TurtleAgent(ROSA):
             response = await self.stream_response(effective_query)
         else:
             response = self.print_response(effective_query)
+        if self.last_events:
+            self.command_handler["info"] = self.show_event_details
+        else:
+            self.command_handler.pop("info", None)
         self._command_logger.log_skill(
             self._turtle_id,
             skill="rosa_response",
@@ -354,6 +422,7 @@ class TurtleAgent(ROSA):
                 turtle_id=self._turtle_id,
                 test_case_id=f"tc-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}",
                 write_long_term=False,
+                mode=self._agent_mode,
             )
             rospy.loginfo(
                 "memory conversion completed: short=%s",
@@ -474,6 +543,17 @@ class TurtleAgent(ROSA):
             return
         else:
             console.print(Markdown("# Tool Usage and Events"))
+            if self.last_user_query:
+                console.print(
+                    Panel(
+                        Group(
+                            Text(self.last_user_query),
+                            Text("Most recent user query", style="dim"),
+                        ),
+                        title="User Query",
+                        border_style="magenta",
+                    )
+                )
 
         for event in self.last_events:
             timestamp = event["timestamp"]
@@ -550,6 +630,7 @@ def main(
             long_count = memory_converter.finalize_session(
                 session_id=command_logger.session_id,
                 turtle_id=str(turtle_id),
+                obstacle_store=obstacle_store,
             )
             rospy.loginfo("long-term finalize completed: written=%s", long_count)
         except Exception as e:
@@ -560,6 +641,7 @@ def main(
 if __name__ == "__main__":
     _maybe_attach_debugpy()
     rospy.init_node("rosa", log_level=rospy.INFO)
+    rospy.loginfo("runtime tools.turtle module: %s", getattr(turtle_tools, "__file__", "unknown"))
 
     # rospy.AsyncSpinner is missing in some stacks; a daemon spin thread is portable.
     def _ros_spin() -> None:

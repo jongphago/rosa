@@ -26,6 +26,11 @@ from typing import Any, Dict, Optional
 
 from langchain.agents import tool
 
+from collision_geometry import (
+    any_segment_intersects_disc,
+    circle_intersects_aabb,
+    segment_intersects_disc,
+)
 from obstacle_store import (
     AabbGeometry,
     CircleGeometry,
@@ -46,6 +51,11 @@ def configure_obstacle_store(store: ObstacleStore) -> None:
     """Inject the process-local store used by obstacle tools."""
     global _STORE
     _STORE = store
+
+
+def get_configured_obstacle_store() -> Optional[ObstacleStore]:
+    """Return currently configured in-process ObstacleStore, if any."""
+    return _STORE
 
 
 def _require_store() -> ObstacleStore:
@@ -134,6 +144,185 @@ def _geometry_to_dict(geometry: ObstacleGeometry) -> Dict[str, Any]:
         "type": "segments",
         "segments": [[[x1, y1], [x2, y2]] for (x1, y1), (x2, y2) in geometry.segments],
     }
+
+
+def _segment_intersects_aabb(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    min_x: float,
+    min_y: float,
+    max_x: float,
+    max_y: float,
+) -> bool:
+    """Return True when a line segment intersects an axis-aligned box."""
+    dx = x2 - x1
+    dy = y2 - y1
+    t_min = 0.0
+    t_max = 1.0
+
+    for p, q in (
+        (-dx, x1 - min_x),
+        (dx, max_x - x1),
+        (-dy, y1 - min_y),
+        (dy, max_y - y1),
+    ):
+        if p == 0.0:
+            if q < 0.0:
+                return False
+            continue
+        ratio = q / p
+        if p < 0.0:
+            t_min = max(t_min, ratio)
+        else:
+            t_max = min(t_max, ratio)
+        if t_min > t_max:
+            return False
+    return True
+
+
+def _point_on_segment(
+    px: float,
+    py: float,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+) -> bool:
+    return (
+        min(x1, x2) <= px <= max(x1, x2)
+        and min(y1, y2) <= py <= max(y1, y2)
+        and (py - y1) * (x2 - x1) == (px - x1) * (y2 - y1)
+    )
+
+
+def _orientation(
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+    cx: float,
+    cy: float,
+) -> int:
+    value = (by - ay) * (cx - bx) - (bx - ax) * (cy - by)
+    if value == 0.0:
+        return 0
+    return 1 if value > 0.0 else 2
+
+
+def _segments_intersect(
+    ax1: float,
+    ay1: float,
+    ax2: float,
+    ay2: float,
+    bx1: float,
+    by1: float,
+    bx2: float,
+    by2: float,
+) -> bool:
+    o1 = _orientation(ax1, ay1, ax2, ay2, bx1, by1)
+    o2 = _orientation(ax1, ay1, ax2, ay2, bx2, by2)
+    o3 = _orientation(bx1, by1, bx2, by2, ax1, ay1)
+    o4 = _orientation(bx1, by1, bx2, by2, ax2, ay2)
+    if o1 != o2 and o3 != o4:
+        return True
+    return (
+        (o1 == 0 and _point_on_segment(bx1, by1, ax1, ay1, ax2, ay2))
+        or (o2 == 0 and _point_on_segment(bx2, by2, ax1, ay1, ax2, ay2))
+        or (o3 == 0 and _point_on_segment(ax1, ay1, bx1, by1, bx2, by2))
+        or (o4 == 0 and _point_on_segment(ax2, ay2, bx1, by1, bx2, by2))
+    )
+
+
+def _segments_within_distance(
+    ax1: float,
+    ay1: float,
+    ax2: float,
+    ay2: float,
+    bx1: float,
+    by1: float,
+    bx2: float,
+    by2: float,
+    distance: float,
+) -> bool:
+    """Return True when two segments are within ``distance`` of each other."""
+    return (
+        _segments_intersect(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2)
+        or segment_intersects_disc(ax1, ay1, ax2, ay2, bx1, by1, distance)
+        or segment_intersects_disc(ax1, ay1, ax2, ay2, bx2, by2, distance)
+        or segment_intersects_disc(bx1, by1, bx2, by2, ax1, ay1, distance)
+        or segment_intersects_disc(bx1, by1, bx2, by2, ax2, ay2, distance)
+    )
+
+
+def _path_hits_obstacle(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    obstacle: Obstacle,
+    clearance: float,
+) -> Optional[str]:
+    geometry = obstacle.geometry
+    if isinstance(geometry, CircleGeometry):
+        if segment_intersects_disc(
+            x1, y1, x2, y2, geometry.cx, geometry.cy, geometry.r + clearance
+        ):
+            return "segment intersects circle inflated by turtle radius and safety margin"
+        return None
+    if isinstance(geometry, AabbGeometry):
+        inflated = {
+            "min_x": geometry.min_x - clearance,
+            "min_y": geometry.min_y - clearance,
+            "max_x": geometry.max_x + clearance,
+            "max_y": geometry.max_y + clearance,
+        }
+        if (
+            circle_intersects_aabb(
+                x1,
+                y1,
+                clearance,
+                geometry.min_x,
+                geometry.min_y,
+                geometry.max_x,
+                geometry.max_y,
+            )
+            or circle_intersects_aabb(
+                x2,
+                y2,
+                clearance,
+                geometry.min_x,
+                geometry.min_y,
+                geometry.max_x,
+                geometry.max_y,
+            )
+            or _segment_intersects_aabb(x1, y1, x2, y2, **inflated)
+        ):
+            return "segment crosses AABB inflated by turtle radius and safety margin"
+        return None
+    if isinstance(geometry, SegmentsGeometry):
+        if (
+            any_segment_intersects_disc(geometry.segments, x1, y1, clearance)
+            or any_segment_intersects_disc(geometry.segments, x2, y2, clearance)
+            or any(
+                _segments_within_distance(
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    sx1,
+                    sy1,
+                    sx2,
+                    sy2,
+                    clearance,
+                )
+                for (sx1, sy1), (sx2, sy2) in geometry.segments
+            )
+        ):
+            return "segment passes within turtle radius and safety margin of obstacle segment"
+        return None
+    raise TypeError(f"unsupported obstacle geometry: {type(geometry).__name__}")
 
 
 @tool
@@ -226,3 +415,85 @@ def list_obstacles(include_expired: bool = False) -> str:
         return json.dumps({"obstacles": rows}, ensure_ascii=False, sort_keys=True)
     except ObstacleToolError as e:
         return f"Failed to list obstacles: {e}"
+
+
+@tool
+def check_path_against_obstacles(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    turtle_radius: float = 0.5,
+    safety_margin: float = 0.2,
+    obstacle_kinds: str = "temporary",
+) -> str:
+    """
+    Check whether a straight turtle movement segment would collide with obstacles.
+
+    Use this before moving through ``publish_twist_to_cmd_vel`` when the user asks
+    to avoid obstacles. ``obstacle_kinds`` is a comma-separated filter such as
+    ``temporary`` or ``temporary,static``.
+    """
+    try:
+        start_x = _coerce_float(x1, "x1")
+        start_y = _coerce_float(y1, "y1")
+        end_x = _coerce_float(x2, "x2")
+        end_y = _coerce_float(y2, "y2")
+        radius = _coerce_float(turtle_radius, "turtle_radius")
+        margin = _coerce_float(safety_margin, "safety_margin")
+        if radius < 0:
+            raise ObstacleToolError("turtle_radius must be non-negative.")
+        if margin < 0:
+            raise ObstacleToolError("safety_margin must be non-negative.")
+        kinds = {
+            item.strip().lower()
+            for item in str(obstacle_kinds).split(",")
+            if item.strip()
+        }
+        if not kinds:
+            raise ObstacleToolError("obstacle_kinds must include at least one kind.")
+
+        clearance = radius + margin
+        blocked_by = []
+        for obstacle in _require_store().snapshot():
+            if obstacle.kind not in kinds:
+                continue
+            reason = _path_hits_obstacle(
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                obstacle,
+                clearance,
+            )
+            if reason:
+                blocked_by.append(
+                    {
+                        "id": obstacle.id,
+                        "kind": obstacle.kind,
+                        "geometry": _geometry_to_dict(obstacle.geometry),
+                        "reason": reason,
+                    }
+                )
+
+        return json.dumps(
+            {
+                "safe": not blocked_by,
+                "start": [start_x, start_y],
+                "end": [end_x, end_y],
+                "turtle_radius": radius,
+                "safety_margin": margin,
+                "clearance": clearance,
+                "checked_kinds": sorted(kinds),
+                "blocked_by": blocked_by,
+                "recommendation": (
+                    "Proceed with this segment."
+                    if not blocked_by
+                    else "Do not execute this segment; replan around blocked_by obstacles."
+                ),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    except (ObstacleToolError, ValueError, TypeError) as e:
+        return f"Failed to check path against obstacles: {e}"
