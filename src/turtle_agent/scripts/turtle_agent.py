@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import dotenv
 import pyinputplus as pyip
 import rospy
+import tools.navigation as navigation_tools
 import tools.obstacle as obstacle_tools
 import tools.turtle as turtle_tools
 from collision_event_sink import make_collision_event_sink
@@ -145,6 +146,7 @@ class TurtleAgent(ROSA):
         self.__blacklist = ["master", "docker"]
         self._obstacle_store = obstacle_store or ObstacleStore()
         obstacle_tools.configure_obstacle_store(self._obstacle_store)
+        navigation_tools.configure_navigation_context(self._obstacle_store)
         self.__prompts = get_prompts()
         self.__llm = get_llm(streaming=streaming)
 
@@ -176,7 +178,7 @@ class TurtleAgent(ROSA):
             ros_version=1,
             llm=self.__llm,
             tools=[cool_turtle_tool, blast_off],
-            tool_packages=[turtle_tools, obstacle_tools],
+            tool_packages=[turtle_tools, obstacle_tools, navigation_tools],
             blacklist=self.__blacklist,
             prompts=self.__prompts,
             verbose=verbose,
