@@ -42,6 +42,16 @@ def remove_cmd_vel_pub(name: str):
     cmd_vel_pubs.pop(name, None)
 
 
+def get_or_create_cmd_vel_pub(name: str) -> rospy.Publisher:
+    """Return cmd_vel publisher for turtle, creating it on demand."""
+    global cmd_vel_pubs
+    pub = cmd_vel_pubs.get(name)
+    if pub is None:
+        pub = rospy.Publisher(f"/{name}/cmd_vel", Twist, queue_size=10)
+        cmd_vel_pubs[name] = pub
+    return pub
+
+
 # Add the default turtle1 publisher on startup
 add_cmd_vel_pub("turtle1", rospy.Publisher(f"/turtle1/cmd_vel", Twist, queue_size=10))
 
@@ -321,7 +331,7 @@ def publish_twist_to_cmd_vel(
 
     try:
         global cmd_vel_pubs
-        pub = cmd_vel_pubs[name]
+        pub = get_or_create_cmd_vel_pub(name)
 
         # Publish continuously during each second-step to avoid undershooting.
         publish_hz = 20
@@ -357,7 +367,7 @@ def stop_turtle(name: str):
     name = name.replace("/", "")
     try:
         global cmd_vel_pubs
-        pub = cmd_vel_pubs[name]
+        pub = get_or_create_cmd_vel_pub(name)
         stop = Twist()
         for _ in range(3):
             pub.publish(stop)
@@ -394,9 +404,10 @@ def reset_turtlesim():
         # Clear the cmd_vel publishers
         global cmd_vel_pubs
         cmd_vel_pubs.clear()
-        cmd_vel_pubs["turtle1"] = rospy.Publisher(
-            f"/turtle1/cmd_vel", Twist, queue_size=10
-        )
+        for turtle_name in ("turtle1", "turtle2", "turtle3"):
+            cmd_vel_pubs[turtle_name] = rospy.Publisher(
+                f"/{turtle_name}/cmd_vel", Twist, queue_size=10
+            )
 
         store = obstacle_tools.get_configured_obstacle_store()
         if store is None:
