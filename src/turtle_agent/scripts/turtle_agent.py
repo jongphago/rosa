@@ -163,6 +163,7 @@ class TurtleAgent(ROSA):
         )
         self._agent_mode = str(rospy.get_param("~agent_mode", "single"))
         self._memory_root = (Path(__file__).resolve().parent / "memory").resolve()
+        self.last_user_query = ""
 
         # Another method for adding tools
         blast_off = Tool(
@@ -222,6 +223,19 @@ class TurtleAgent(ROSA):
                 args=args,
                 status="success",
                 result=str(observation)[:4000],
+            )
+            # Keep lightweight tool traces so `info` works in non-streaming mode as well.
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            self.last_events.append(
+                {"type": "tool_start", "name": str(tool_name), "input": args, "timestamp": ts}
+            )
+            self.last_events.append(
+                {
+                    "type": "tool_end",
+                    "name": str(tool_name),
+                    "output": str(observation)[:4000],
+                    "timestamp": ts,
+                }
             )
 
     def blast_off(self, input: str):
@@ -313,6 +327,8 @@ class TurtleAgent(ROSA):
                 continue
 
     async def submit(self, query: str):
+        self.last_user_query = query
+        self.last_events = []
         query_ctx = infer_query_context(query)
         memory_context = ""
         memory_hits = 0
@@ -343,6 +359,10 @@ class TurtleAgent(ROSA):
             response = await self.stream_response(effective_query)
         else:
             response = self.print_response(effective_query)
+        if self.last_events:
+            self.command_handler["info"] = self.show_event_details
+        else:
+            self.command_handler.pop("info", None)
         self._command_logger.log_skill(
             self._turtle_id,
             skill="rosa_response",
@@ -482,6 +502,17 @@ class TurtleAgent(ROSA):
             return
         else:
             console.print(Markdown("# Tool Usage and Events"))
+            if self.last_user_query:
+                console.print(
+                    Panel(
+                        Group(
+                            Text(self.last_user_query),
+                            Text("Most recent user query", style="dim"),
+                        ),
+                        title="User Query",
+                        border_style="magenta",
+                    )
+                )
 
         for event in self.last_events:
             timestamp = event["timestamp"]
