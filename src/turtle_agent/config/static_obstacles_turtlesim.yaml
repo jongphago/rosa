@@ -80,6 +80,10 @@ obstacles:
       cx: 2.0
       cy: 9.0
       r: 0.25
+<<<<<<< fix/initial-turtle-headings
+=======
+
+>>>>>>> dev
 # Optional: spawn turtles once static world is loaded.
 # Existing turtles with the same names are removed before spawn.
 initial_turtles:
@@ -90,8 +94,16 @@ initial_turtles:
   - name: turtle2
     x: 9.0
     y: 9.0
+<<<<<<< fix/initial-turtle-headings
     theta: 4.71238898038
   - name: turtle3
     x: 9.0
     y: 2.0
     theta: 3.14159265359
+=======
+    theta: 0.0
+  - name: turtle3
+    x: 9.0
+    y: 2.0
+    theta: 0.0
+>>>>>>> dev

@@ -161,6 +161,7 @@ class TurtleAgent(ROSA):
         self._turtle_id = rospy.get_param(
             "~turtle_id", os.environ.get("TURTLE_TURTLE_ID", "turtle1")
         )
+        self._agent_mode = str(rospy.get_param("~agent_mode", "single"))
         self._memory_root = (Path(__file__).resolve().parent / "memory").resolve()
 
         # Another method for adding tools
@@ -313,13 +314,17 @@ class TurtleAgent(ROSA):
 
     async def submit(self, query: str):
         query_ctx = infer_query_context(query)
-        long_records = load_long_term_records(self._memory_root, self._turtle_id)
-        memory_context, memory_hits = build_memory_context(query, long_records, top_k=2)
+        memory_context = ""
+        memory_hits = 0
+        if self._agent_mode.strip().lower() == "single":
+            long_records = load_long_term_records(self._memory_root, self._turtle_id)
+            memory_context, memory_hits = build_memory_context(query, long_records, top_k=3)
         effective_query = (
             f"{memory_context}\n\nUser query:\n{query}" if memory_context else query
         )
         rospy.loginfo(
-            "memory prompt: hits=%s experience_key=%s",
+            "memory prompt: mode=%s hits=%s experience_key=%s",
+            self._agent_mode,
             memory_hits,
             query_ctx.get("experience_key", ""),
         )
@@ -356,6 +361,7 @@ class TurtleAgent(ROSA):
                 turtle_id=self._turtle_id,
                 test_case_id=f"tc-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}",
                 write_long_term=False,
+                mode=self._agent_mode,
             )
             rospy.loginfo(
                 "memory conversion completed: short=%s",
