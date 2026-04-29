@@ -199,6 +199,7 @@ class TurtleAgent(ROSA):
             "help": lambda: self.submit(get_help(self.examples)),
             "examples": lambda: self.submit(self.choose_example()),
             "clear": lambda: self.clear(),
+            "reset": lambda: self.run_reset_command(),
         }
 
     def _record_agent_tool_steps(self, intermediate_steps: List[Tuple[Any, Any]]) -> None:
@@ -325,6 +326,45 @@ class TurtleAgent(ROSA):
             except Exception as e:
                 console.print(f"[red]Error: {e}[/red]")
                 continue
+
+    async def run_reset_command(self):
+        """Run reset tool directly without LLM interpretation."""
+        console = Console()
+        try:
+            result = turtle_tools.reset_turtlesim.invoke({})
+            self.last_user_query = "reset"
+            self.last_events = [
+                {
+                    "type": "tool_start",
+                    "name": "reset_turtlesim",
+                    "input": {},
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                },
+                {
+                    "type": "tool_end",
+                    "name": "reset_turtlesim",
+                    "output": str(result),
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                },
+            ]
+            self.command_handler["info"] = self.show_event_details
+            console.print(
+                Panel(
+                    Markdown(str(result) + "\n\nType `info` for reset execution details."),
+                    title="Reset Command",
+                    border_style="green",
+                )
+            )
+        except Exception as e:
+            self.last_events = [
+                {
+                    "type": "error",
+                    "content": f"reset command failed: {e}",
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                }
+            ]
+            self.command_handler["info"] = self.show_event_details
+            console.print(f"[red]reset command failed: {e}[/red]")
 
     async def submit(self, query: str):
         self.last_user_query = query
