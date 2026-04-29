@@ -163,6 +163,7 @@ class TurtleAgent(ROSA):
         )
         self._agent_mode = str(rospy.get_param("~agent_mode", "single"))
         self._memory_root = (Path(__file__).resolve().parent / "memory").resolve()
+        self.last_user_query = ""
 
         # Another method for adding tools
         blast_off = Tool(
@@ -198,6 +199,7 @@ class TurtleAgent(ROSA):
             "help": lambda: self.submit(get_help(self.examples)),
             "examples": lambda: self.submit(self.choose_example()),
             "clear": lambda: self.clear(),
+            "reset": lambda: self.run_reset_command(),
         }
 
     def _record_agent_tool_steps(self, intermediate_steps: List[Tuple[Any, Any]]) -> None:
@@ -222,6 +224,19 @@ class TurtleAgent(ROSA):
                 args=args,
                 status="success",
                 result=str(observation)[:4000],
+            )
+            # Keep lightweight tool traces so `info` works in non-streaming mode as well.
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            self.last_events.append(
+                {"type": "tool_start", "name": str(tool_name), "input": args, "timestamp": ts}
+            )
+            self.last_events.append(
+                {
+                    "type": "tool_end",
+                    "name": str(tool_name),
+                    "output": str(observation)[:4000],
+                    "timestamp": ts,
+                }
             )
 
     def blast_off(self, input: str):
@@ -312,7 +327,48 @@ class TurtleAgent(ROSA):
                 console.print(f"[red]Error: {e}[/red]")
                 continue
 
+    async def run_reset_command(self):
+        """Run reset tool directly without LLM interpretation."""
+        console = Console()
+        try:
+            result = turtle_tools.reset_turtlesim.invoke({})
+            self.last_user_query = "reset"
+            self.last_events = [
+                {
+                    "type": "tool_start",
+                    "name": "reset_turtlesim",
+                    "input": {},
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                },
+                {
+                    "type": "tool_end",
+                    "name": "reset_turtlesim",
+                    "output": str(result),
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                },
+            ]
+            self.command_handler["info"] = self.show_event_details
+            console.print(
+                Panel(
+                    Markdown(str(result) + "\n\nType `info` for reset execution details."),
+                    title="Reset Command",
+                    border_style="green",
+                )
+            )
+        except Exception as e:
+            self.last_events = [
+                {
+                    "type": "error",
+                    "content": f"reset command failed: {e}",
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                }
+            ]
+            self.command_handler["info"] = self.show_event_details
+            console.print(f"[red]reset command failed: {e}[/red]")
+
     async def submit(self, query: str):
+        self.last_user_query = query
+        self.last_events = []
         query_ctx = infer_query_context(query)
         memory_context = ""
         memory_hits = 0
@@ -343,6 +399,10 @@ class TurtleAgent(ROSA):
             response = await self.stream_response(effective_query)
         else:
             response = self.print_response(effective_query)
+        if self.last_events:
+            self.command_handler["info"] = self.show_event_details
+        else:
+            self.command_handler.pop("info", None)
         self._command_logger.log_skill(
             self._turtle_id,
             skill="rosa_response",
@@ -482,6 +542,17 @@ class TurtleAgent(ROSA):
             return
         else:
             console.print(Markdown("# Tool Usage and Events"))
+            if self.last_user_query:
+                console.print(
+                    Panel(
+                        Group(
+                            Text(self.last_user_query),
+                            Text("Most recent user query", style="dim"),
+                        ),
+                        title="User Query",
+                        border_style="magenta",
+                    )
+                )
 
         for event in self.last_events:
             timestamp = event["timestamp"]
