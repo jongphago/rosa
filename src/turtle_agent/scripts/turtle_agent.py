@@ -42,7 +42,11 @@ from langchain.agents import Tool, tool
 # from langchain_ollama import ChatOllama
 from llm import get_llm
 from memory_converter import MemoryConverter
-from memory_prompting import build_memory_context, infer_query_context, load_long_term_records
+from memory_prompting import (
+    build_memory_context_result,
+    infer_query_context,
+    load_long_term_records,
+)
 from obstacle_store import ObstacleStore
 from pose_hub import PoseHub
 from pose_logger import (
@@ -59,6 +63,7 @@ from rich.text import Text
 from rosa import ROSA
 from ros_params import get_bool_param
 from static_world import load_static_world
+from tool_policy import ToolPolicyEvidence, filter_tools_for_policy
 
 
 def _maybe_attach_debugpy() -> None:
@@ -206,6 +211,7 @@ class TurtleAgent(ROSA):
             return_intermediate_steps=True,
             on_intermediate_steps=self._record_agent_tool_steps,
         )
+        self._all_agent_tools = tuple(self.get_configured_tools())
 
         self.examples = [
             "Give me a ROS tutorial using the turtlesim.",
@@ -550,11 +556,17 @@ class TurtleAgent(ROSA):
         query_ctx = infer_query_context(normalized_query)
         memory_context = ""
         memory_hits = 0
+        memory_result = None
         if self._agent_mode.strip().lower() == "single":
             long_records = load_long_term_records(self._memory_root, self._turtle_id)
-            memory_context, memory_hits = build_memory_context(
+            memory_result = build_memory_context_result(
                 normalized_query, long_records, top_k=3
             )
+            memory_context = memory_result.context
+            memory_hits = memory_result.hits
+        tool_policy = ToolPolicyEvidence.from_memory_result(memory_result)
+        tool_decision = filter_tools_for_policy(self._all_agent_tools, tool_policy)
+        self.set_active_tools(list(tool_decision.active_tools))
         preprocess_block = str(preprocess.get("preprocessing_block", "")).strip()
         snapshot = self._read_pose_snapshot()
         query_parts: List[str] = []
@@ -571,10 +583,12 @@ class TurtleAgent(ROSA):
         query_parts.append(f"User query:\n{normalized_query}")
         effective_query = "\n\n".join(query_parts)
         rospy.loginfo(
-            "memory prompt: mode=%s hits=%s experience_key=%s",
+            "memory prompt: mode=%s hits=%s experience_key=%s policy_tags=%s disabled_tools=%s",
             self._agent_mode,
             memory_hits,
             query_ctx.get("experience_key", ""),
+            ",".join(tool_decision.enabled_tags),
+            ",".join(tool_decision.disabled_tools),
         )
         self._command_logger.log_intent(
             self._turtle_id,

@@ -10,6 +10,7 @@ sys.path.insert(0, str(_SCRIPTS))
 from memory_modules.memory_long_term import fallback_lessons_lines  # noqa: E402
 from memory_prompting import (  # noqa: E402
     build_memory_context,
+    build_memory_context_result,
     infer_query_context,
     load_long_term_records,
 )
@@ -139,6 +140,52 @@ class TestMemoryPrompting(unittest.TestCase):
         self.assertNotIn("Avoid single long straight moves", context)
         self.assertNotIn("Do not choose a single straight-line path", context)
         self.assertNotIn("check_path_against_obstacles", context)
+
+    def test_memory_context_result_exposes_obstacle_policy_only_from_selected_memory(self):
+        records = [
+            {
+                "turtle_id": "turtle1",
+                "payload": {
+                    "operation": {
+                        "nl_goal": {"text": "go to 1, 5"},
+                        "intent_norm": {"task_family": "navigate", "slots": {}},
+                    },
+                    "evidence": {
+                        "collision_enter_count": 1,
+                        "collision_obstacles": ["wet"],
+                        "success_rate": 0.0,
+                    },
+                    "lessons": ["동일한 조건에서 wet 장애물 근거를 참고합니다."],
+                },
+            }
+        ]
+
+        result = build_memory_context_result("go to 2, 3", records, top_k=1)
+
+        self.assertEqual(result.hits, 1)
+        self.assertIn("obstacle_validation", result.policy_tags)
+
+    def test_memory_context_result_ignores_user_obstacle_word_without_memory_evidence(self):
+        records = [
+            {
+                "turtle_id": "turtle1",
+                "payload": {
+                    "operation": {
+                        "nl_goal": {"text": "go to 1, 5"},
+                        "intent_norm": {"task_family": "navigate", "slots": {}},
+                    },
+                    "evidence": {"collision_enter_count": 0, "success_rate": 1.0},
+                    "lessons": ["기록된 충돌은 없습니다."],
+                },
+            }
+        ]
+
+        result = build_memory_context_result(
+            "go to 2, 3 while avoiding obstacles", records, top_k=1
+        )
+
+        self.assertEqual(result.hits, 1)
+        self.assertNotIn("obstacle_validation", result.policy_tags)
 
     def test_load_long_term_records_filters_by_turtle(self):
         with tempfile.TemporaryDirectory() as td:
