@@ -107,6 +107,7 @@ class ROSA:
         self.__blacklist = blacklist if blacklist else []
         self.__accumulate_chat_history = accumulate_chat_history
         self.__streaming = streaming
+        self.__verbose = verbose
         self.__max_iterations = max_iterations
         self.__return_intermediate_steps = return_intermediate_steps
         self.__on_intermediate_steps = on_intermediate_steps
@@ -114,6 +115,7 @@ class ROSA:
             ros_version, packages=tool_packages, tools=tools, blacklist=self.__blacklist
         )
         self.__prompts = self._get_prompts(prompts)
+        self.__active_tools = list(self.__tools.get_tools())
         self.__agent = self._get_agent()
         self.__executor = self._get_executor(verbose=verbose)
         # cache this check - no need to do isinstance on every invoke
@@ -136,6 +138,20 @@ class ROSA:
     def clear_chat(self):
         """Clear the chat history."""
         self.__chat_history = []
+
+    def get_configured_tools(self) -> List[Any]:
+        """Return the full configured tool list before per-query filtering."""
+        return list(self.__tools.get_tools())
+
+    def get_active_tools(self) -> List[Any]:
+        """Return the tool list currently exposed to the agent executor."""
+        return list(self.__active_tools)
+
+    def set_active_tools(self, tools: List[Any]) -> None:
+        """Replace the active tool list and rebuild the agent/executor."""
+        self.__active_tools = list(tools)
+        self.__agent = self._get_agent()
+        self.__executor = self._get_executor(verbose=self.__verbose)
 
     def invoke(self, query: str) -> str:
         """
@@ -271,7 +287,7 @@ class ROSA:
         """Create and return an executor for processing user inputs and generating responses."""
         executor = AgentExecutor(
             agent=self.__agent,
-            tools=self.__tools.get_tools(),
+            tools=self.__active_tools,
             stream_runnable=self.__streaming,
             verbose=verbose,
             max_iterations=self.__max_iterations,
@@ -284,7 +300,7 @@ class ROSA:
         """Create and return an agent for processing user inputs and generating responses."""
         agent = create_tool_calling_agent(
             llm=self.__llm,
-            tools=self.__tools.get_tools(),
+            tools=self.__active_tools,
             prompt=self.__prompts,
         )
         return agent

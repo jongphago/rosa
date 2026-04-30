@@ -3,8 +3,19 @@ from __future__ import annotations
 import json
 import math
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+
+@dataclass(frozen=True)
+class MemoryContextResult:
+    context: str
+    hits: int
+    query_context: Dict[str, Any]
+    selected_records: Tuple[Dict[str, Any], ...] = ()
+    policy_tags: Tuple[str, ...] = ()
+    policy_reasons: Tuple[str, ...] = ()
 
 
 def infer_query_context(query: str) -> Dict[str, Any]:
@@ -197,11 +208,56 @@ def _record_sort_tuple(score: int, record_ctx: Dict[str, Any], row: Dict[str, An
     return (score, _slot_specificity(record_ctx), collisions, -success_rate, created_at)
 
 
-def build_memory_context(query: str, records: List[Dict[str, Any]], top_k: int = 3) -> Tuple[str, int]:
+def _has_obstacle_policy_evidence(row: Dict[str, Any]) -> bool:
+    payload = row.get("payload", {})
+    evidence = payload.get("evidence", {})
+    lessons = payload.get("lessons")
+    if not isinstance(evidence, dict):
+        return False
+    if not isinstance(lessons, list) or not any(
+        isinstance(lesson, str) and lesson.strip() for lesson in lessons
+    ):
+        return False
+    if _safe_int(evidence.get("collision_enter_count"), 0) > 0:
+        return True
+    for key in (
+        "collision_obstacles",
+        "collision_temporary_obstacles",
+        "collision_obstacle_geometries",
+        "collision_hotspots",
+    ):
+        value = evidence.get(key)
+        if isinstance(value, list) and value:
+            return True
+    return False
+
+
+def _policy_tags_for_records(
+    selected_records: List[Dict[str, Any]],
+) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    tags: set[str] = set()
+    reasons: List[str] = []
+    for row in selected_records:
+        if not _has_obstacle_policy_evidence(row):
+            continue
+        tags.add("obstacle_validation")
+        payload = row.get("payload", {})
+        operation = payload.get("operation", {}) if isinstance(payload, dict) else {}
+        goal_text = str(operation.get("nl_goal", {}).get("text", "")).strip()
+        if goal_text:
+            reasons.append(f"selected memory has obstacle evidence for goal={goal_text[:80]}")
+        else:
+            reasons.append("selected memory has obstacle evidence and lessons")
+    return tuple(sorted(tags)), tuple(reasons)
+
+
+def build_memory_context_result(
+    query: str, records: List[Dict[str, Any]], top_k: int = 3
+) -> MemoryContextResult:
     query_ctx = infer_query_context(query)
     max_k = max(0, int(top_k))
     if max_k == 0:
-        return "", 0
+        return MemoryContextResult("", 0, query_ctx)
     min_score = 45
     deduped: Dict[str, Tuple[Tuple[int, int, int, float, int], Dict[str, Any], str, Dict[str, Any], int]] = {}
     for row in records:
@@ -218,9 +274,10 @@ def build_memory_context(query: str, records: List[Dict[str, Any]], top_k: int =
         if prev is None or sort_tuple > prev[0]:
             deduped[key] = (sort_tuple, row, quality, record_ctx, score)
     if not deduped:
-        return "", 0
+        return MemoryContextResult("", 0, query_ctx)
     ranked = sorted(deduped.values(), key=lambda item: item[0], reverse=True)
     selected = ranked[: min(max_k, len(ranked))]
+    selected_records = [item[1] for item in selected]
     lines: List[str] = []
     do_lines: List[str] = []
     dont_lines: List[str] = []
@@ -303,4 +360,17 @@ def build_memory_context(query: str, records: List[Dict[str, Any]], top_k: int =
         context += "\n\nDO rules:\n" + "\n".join(f"- {line}" for line in do_lines[:6])
     if dont_lines:
         context += "\n\nDON'T rules:\n" + "\n".join(f"- {line}" for line in dont_lines[:6])
-    return context, len(selected)
+    policy_tags, policy_reasons = _policy_tags_for_records(selected_records)
+    return MemoryContextResult(
+        context=context,
+        hits=len(selected),
+        query_context=query_ctx,
+        selected_records=tuple(selected_records),
+        policy_tags=policy_tags,
+        policy_reasons=policy_reasons,
+    )
+
+
+def build_memory_context(query: str, records: List[Dict[str, Any]], top_k: int = 3) -> Tuple[str, int]:
+    result = build_memory_context_result(query, records, top_k=top_k)
+    return result.context, result.hits
