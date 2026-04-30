@@ -21,7 +21,12 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from obstacle_store import ObstacleStore
-from static_map_loader import StaticMapLoadError, load_file
+from static_map_loader import (
+    StaticMapLoadError,
+    load_into_store,
+    obstacles_from_data_for_visual,
+    parse_map_file,
+)
 from world_builder import draw_static_world
 
 
@@ -100,13 +105,18 @@ def load_static_world(obstacle_store: ObstacleStore) -> None:
     path = str(rospy.get_param("~static_obstacles_file", "")).strip()
     if path:
         try:
-            load_file(obstacle_store, path)
+            p = Path(path).expanduser()
+            data = parse_map_file(p)
+            load_into_store(obstacle_store, data, source=str(p))
         except StaticMapLoadError as e:
             rospy.logerr("static obstacles: %s", e)
             raise
         if rospy.get_param("~draw_static_world", True):
             try:
-                count = draw_static_world(obstacle_store)
+                draw_shapes = obstacles_from_data_for_visual(data, source=str(p))
+                count = draw_static_world(
+                    obstacle_store, draw_obstacles=draw_shapes
+                )
                 rospy.loginfo("static world builder drew %s segments", count)
             except Exception as e:
                 rospy.logerr("static world builder failed: %s", e)

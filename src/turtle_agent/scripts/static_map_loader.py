@@ -16,6 +16,14 @@
 
 YAML/JSON document shape::
 
+    # Optional: if set, only these obstacle ``id`` values are upserted into
+    # ``ObstacleStore``. Other entries in ``obstacles`` are still used for the
+    # initial turtlesim outline; use :func:`obstacles_from_data_for_visual` with
+    # the same document so drawing matches the full YAML list.
+    obstacle_store_include_ids:
+      - wall-south
+      - wet-top
+
     obstacles:
       - id: wall-south
         kind: static   # optional; omitted defaults to static
@@ -226,6 +234,77 @@ def _parse_obstacle_entry(raw: Any, *, source: Optional[str], index: int) -> Obs
     )
 
 
+def _peek_obstacle_id(raw: Any) -> Optional[str]:
+    if isinstance(raw, MutableMapping):
+        oid = raw.get("id")
+        if isinstance(oid, str) and oid.strip():
+            return oid.strip()
+    return None
+
+
+def _parse_obstacle_store_include_ids(
+    data: Mapping[str, Any], *, source: Optional[str], items: List[Any]
+) -> Optional[set[str]]:
+    """Return allowlist of ids to load into the store, or None to load all."""
+    raw = data.get("obstacle_store_include_ids")
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)):
+        raise _err(
+            "obstacle_store_include_ids must be a list of id strings",
+            source=source,
+            index=None,
+        )
+    allow = {str(x).strip() for x in raw if str(x).strip()}
+    if not allow:
+        raise _err(
+            "obstacle_store_include_ids must be non-empty when provided",
+            source=source,
+            index=None,
+        )
+    doc_ids = set()
+    for raw_ob in items:
+        oid = _peek_obstacle_id(raw_ob)
+        if oid:
+            doc_ids.add(oid)
+    missing = sorted(allow - doc_ids)
+    if missing:
+        raise _err(
+            "obstacle_store_include_ids references ids not present under obstacles: "
+            + ", ".join(missing),
+            source=source,
+            index=None,
+        )
+    return allow
+
+
+def parse_map_file(path: Union[str, Path]) -> Dict[str, Any]:
+    """Load a static map file into a document dict (does not modify ``ObstacleStore``)."""
+    p = Path(path).expanduser()
+    if not p.is_file():
+        raise StaticMapLoadError(f"not a file: {p}")
+    return _parse_file_bytes(p.read_bytes(), p)
+
+
+def obstacles_from_data_for_visual(
+    data: Mapping[str, Any], *, source: Optional[str] = None
+) -> Tuple[Obstacle, ...]:
+    """Parse every ``obstacles`` entry for turtlesim drawing.
+
+    Ignores ``obstacle_store_include_ids`` so the drawn outline matches the full
+    ``obstacles`` list while :func:`load_into_store` may register only a subset.
+    """
+    if "obstacles" not in data:
+        raise _err("root key 'obstacles' is required", source=source, index=None)
+    items = data["obstacles"]
+    if not isinstance(items, list):
+        raise _err("'obstacles' must be a list", source=source, index=None)
+    out: List[Obstacle] = []
+    for i, raw in enumerate(items):
+        out.append(_parse_obstacle_entry(raw, source=source, index=i))
+    return tuple(out)
+
+
 def load_into_store(
     store: ObstacleStore,
     data: Mapping[str, Any],
@@ -243,9 +322,15 @@ def load_into_store(
     if not isinstance(items, list):
         raise _err("'obstacles' must be a list", source=source, index=None)
 
+    include_ids = _parse_obstacle_store_include_ids(data, source=source, items=items)
+
     seen_in_doc: set[str] = set()
     count = 0
     for i, raw in enumerate(items):
+        if include_ids is not None:
+            oid = _peek_obstacle_id(raw)
+            if oid is None or oid not in include_ids:
+                continue
         ob = _parse_obstacle_entry(raw, source=source, index=i)
         if on_duplicate_id == "error":
             if ob.id in seen_in_doc:
@@ -304,9 +389,7 @@ def load_file(
 ) -> int:
     """Load obstacles from a YAML or JSON file into ``store``."""
     p = Path(path).expanduser()
-    if not p.is_file():
-        raise StaticMapLoadError(f"not a file: {p}")
-    data = _parse_file_bytes(p.read_bytes(), p)
+    data = parse_map_file(p)
     return load_into_store(store, data, on_duplicate_id=on_duplicate_id, source=str(p))
 
 

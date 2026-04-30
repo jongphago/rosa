@@ -16,13 +16,16 @@
 
 This module is deliberately not a LangChain tool. It is called once during node
 startup after static map loading and before the agent conversation begins.
+
+When ``draw_obstacles`` is passed (full map parse), those obstacles define the
+drawn outline; otherwise segments come from the current ``ObstacleStore`` only.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Iterable, Tuple
+from typing import Iterable, Optional, Tuple
 
 from obstacle_store import (
     AabbGeometry,
@@ -99,13 +102,17 @@ def _segments_for_obstacle(
 def draw_static_world(
     store: ObstacleStore,
     *,
+    draw_obstacles: Optional[Iterable[Obstacle]] = None,
     turtle_name: str = "world_builder",
     circle_segments: int = 24,
     pen_rgb: Tuple[int, int, int] = (40, 40, 40),
     pen_width: int = 2,
     service_timeout: float = 5.0,
 ) -> int:
-    """Draw the current store snapshot with a temporary builder turtle.
+    """Draw static outlines with a temporary builder turtle.
+
+    If ``draw_obstacles`` is set, those obstacles (typically every YAML entry)
+    define the segments; otherwise the current ``store`` snapshot is used.
 
     Returns the number of line segments drawn. The builder turtle is removed on
     exit when possible.
@@ -113,7 +120,12 @@ def draw_static_world(
     import rospy
     from turtlesim.srv import Kill, SetPen, Spawn, TeleportAbsolute
 
-    segments = render_segments_from_store(store, circle_segments=circle_segments)
+    if draw_obstacles is not None:
+        segments = render_segments_from_obstacles(
+            tuple(draw_obstacles), circle_segments=circle_segments
+        )
+    else:
+        segments = render_segments_from_store(store, circle_segments=circle_segments)
     if not segments:
         return 0
 
