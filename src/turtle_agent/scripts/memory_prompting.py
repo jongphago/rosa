@@ -261,8 +261,6 @@ def build_memory_context(query: str, records: List[Dict[str, Any]], top_k: int =
     lines: List[str] = []
     success_lines: List[str] = []
     dont_lines: List[str] = []
-    temporary_zone_rules: List[str] = []
-    seen_zone_rules: set[str] = set()
     for idx, (_, row, quality, _, score) in enumerate(selected, start=1):
         payload = row.get("payload", {})
         op = payload.get("operation", {})
@@ -272,14 +270,6 @@ def build_memory_context(query: str, records: List[Dict[str, Any]], top_k: int =
         success_rate = _safe_float(evidence.get("success_rate"))
 
         collision_obstacle_geometries = evidence.get("collision_obstacle_geometries") or []
-        for oid, min_x, min_y, max_x, max_y in _extract_temporary_aabb_zones(evidence):
-            zone_rule = (
-                f"avoid temporary obstacle `{oid}` zone: "
-                f"x in [{min_x:.2f}, {max_x:.2f}] and y in [{min_y:.2f}, {max_y:.2f}]"
-            )
-            if zone_rule not in seen_zone_rules:
-                seen_zone_rules.add(zone_rule)
-                temporary_zone_rules.append(zone_rule)
         goal_snippet = goal_text[:40]
         lines.append(
             f"{idx}. goal={goal_snippet} / enter={collisions}"
@@ -318,12 +308,9 @@ def build_memory_context(query: str, records: List[Dict[str, Any]], top_k: int =
                     success_lines.append(lesson)
     policy_lines = ["MUST: Use selected memory as execution policy, not commentary."]
     if query_ctx.get("task_family") == "navigate":
-        if temporary_zone_rules:
-            policy_lines.append(
-                "MUST: Plan path segments that detour around temporary obstacle zones."
-            )
-            for zr in temporary_zone_rules[:4]:
-                policy_lines.append(f"MUST NOT: {zr}")
+        policy_lines.append(
+            "MUST: Apply lessons while planning obstacle-aware segmented movement."
+        )
     if dont_lines:
         policy_lines.append(
             "MUST: Apply failure-case lessons as cautionary guidance for this query."
@@ -338,10 +325,10 @@ def build_memory_context(query: str, records: List[Dict[str, Any]], top_k: int =
         context += "\n".join(lines[:1])
     if success_lines:
         context += "\n\nSuccess-case lessons:\n" + "\n".join(
-            f"- {line}" for line in success_lines[:2]
+            f"- {line}" for line in success_lines[:3]
         )
     if dont_lines:
         context += "\n\nFailure-case lessons:\n" + "\n".join(
-            f"- {line}" for line in dont_lines[:2]
+            f"- {line}" for line in dont_lines[:3]
         )
     return context, len(selected)
