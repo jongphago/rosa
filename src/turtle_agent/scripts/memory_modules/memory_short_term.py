@@ -121,6 +121,21 @@ def _bucket_collision_events_by_skill_index(
     return buckets
 
 
+def _intent_for_skill_time(
+    intents: List[Dict[str, Any]], skill_t_ms: int
+) -> Dict[str, Any]:
+    if not intents:
+        return {}
+    chosen = intents[0]
+    chosen_t = int(chosen.get("t_ms", 0))
+    for cand in intents:
+        cand_t = int(cand.get("t_ms", 0))
+        if cand_t <= skill_t_ms and cand_t >= chosen_t:
+            chosen = cand
+            chosen_t = cand_t
+    return chosen
+
+
 @dataclass
 class ShortTermCreateInput:
     session_id: str
@@ -232,18 +247,17 @@ def build_short_term_records(
     skills = [row for row in command_rows if row.get("type") == "skill"]
     if not skills:
         return []
-
-    intent = intents[0] if intents else {}
-    nl_text = str(
-        intent.get("natural_language")
-        or intent.get("query")
-        or intent.get("task_family", "unknown")
-    )
     collision_by_skill = _bucket_collision_events_by_skill_index(collision_rows or [], skills)
 
     records: List[Dict[str, Any]] = []
     for idx, skill in enumerate(skills):
         t_ms = int(skill.get("t_ms", 0))
+        intent = _intent_for_skill_time(intents, t_ms)
+        nl_text = str(
+            intent.get("natural_language")
+            or intent.get("query")
+            or intent.get("task_family", "unknown")
+        )
         query_id = f"{session_id}:{idx + 1}"
         record = create_short_term_record(
             session_id=session_id,
@@ -253,29 +267,26 @@ def build_short_term_records(
             intent=str(intent.get("task_family", "natural_language_query")),
             constraints={},
         )
-        for j, s in enumerate(skills[: idx + 1]):
-            step_t_ms = int(s.get("t_ms", 0))
-            update_short_term_record(
-                record,
-                plan_step={
-                    "skill": s.get("skill", ""),
-                    "status": s.get("status", "pending"),
-                },
-                execution_step={
-                    "t_ms": step_t_ms,
-                    "skill": s.get("skill", ""),
-                    "args": s.get("args", {}),
-                    "status": s.get("status", "unknown"),
-                    "result": s.get("result", ""),
-                },
-            )
-            for event in list(collision_by_skill[j]):
-                update_short_term_record(record, collision_event=event)
-        start_pose = (
-            _pick_pose_for_time(location_rows, int(skills[0].get("t_ms", 0)))
-            if skills
-            else {"x": 0.0, "y": 0.0, "theta": 0.0}
+        # Delta mode: each short-term row stores only the current step.
+        update_short_term_record(
+            record,
+            plan_step={
+                "skill": skill.get("skill", ""),
+                "status": skill.get("status", "pending"),
+            },
+            execution_step={
+                "t_ms": t_ms,
+                "skill": skill.get("skill", ""),
+                "args": skill.get("args", {}),
+                "status": skill.get("status", "unknown"),
+                "result": skill.get("result", ""),
+            },
         )
+        for event in list(collision_by_skill[idx]):
+            update_short_term_record(record, collision_event=event)
+
+        prev_t_ms = int(skills[idx - 1].get("t_ms", 0)) if idx > 0 else t_ms
+        start_pose = _pick_pose_for_time(location_rows, prev_t_ms)
         final_pose = _pick_pose_for_time(location_rows, t_ms)
         is_last = idx == (len(skills) - 1)
         terminal_status = str(skill.get("status", "unknown")).lower()

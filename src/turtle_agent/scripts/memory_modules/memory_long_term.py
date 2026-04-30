@@ -279,27 +279,37 @@ def lessons_context_payload(
     first_goal: str,
     queries: List[str],
 ) -> Dict[str, Any]:
-    goals = []
-    seen: set[str] = set()
-    for q in [first_goal] + queries:
-        g = str(q).strip()
-        if g and g not in seen:
-            seen.add(g)
-            goals.append(g)
-    skills_used: List[str] = []
-    sk_seen: set[str] = set()
-    for item in action_trace:
-        sk = str(item.get("skill", "")).strip()
-        if sk and sk not in sk_seen:
-            sk_seen.add(sk)
-            skills_used.append(sk)
+    # lessons 생성에는 "핵심 충돌 요약"만 필요하므로 입력 컨텍스트를 최소화한다.
+    goal_primary = str(first_goal or "").strip()
+    goal_latest = ""
+    for q in queries:
+        text = str(q or "").strip()
+        if text:
+            goal_latest = text
+    if goal_latest == goal_primary:
+        goal_latest = ""
+
+    temporary_ids = collision_ev.get("collision_temporary_obstacles") or []
+    if not isinstance(temporary_ids, list):
+        temporary_ids = []
+    temporary_ids = [str(x).strip() for x in temporary_ids if str(x).strip()][:5]
+
+    # geometry는 문자열이 길어지기 쉬워 개수와 길이를 함께 제한한다.
+    geometry_brief: List[str] = []
+    for item in collision_obstacle_geometries[:3]:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        geometry_brief.append(text[:120])
+
     return {
         "task_family": task_family,
-        "goals": goals,
-        "collision": dict(collision_ev),
-        # 장애물 geometry/좌표 요약을 lessons 생성에 함께 제공(최소 텍스트)
-        "collision_obstacle_geometries": collision_obstacle_geometries[:8],
-        "skills_used": skills_used[:40],
+        "goal_primary": goal_primary,
+        "goal_latest": goal_latest,
+        "collision_enter_count": int(collision_ev.get("collision_enter_count", 0)),
+        "collision_temporary_obstacles": temporary_ids,
+        # 장애물 geometry/좌표 요약을 lessons 생성에 함께 제공(길이 제한)
+        "collision_obstacle_geometries": geometry_brief,
     }
 
 
@@ -376,20 +386,14 @@ def summarize_lessons_with_llm(
             ctx = ctx[:12000] + "\n…(truncated)"
 
         prompt = (
-            "당신은 turtle_agent의 단기 메모리(short-term) 요약을 읽고 "
-            "같은 세션에서 다음에 활용할 교훈만 추립니다.\n\n"
-            "규칙:\n"
-            "- 단기 기록에서 실제로 나타난 목표·행동·충돌·(장애물 geometry)만 근거로 씁니다. 추측은 최소화합니다.\n"
-            "- 출력은 반드시 3문장 구성으로 하며, 각 문장은 한 줄에 하나씩입니다.\n"
-            "- 1번째 문장: 충돌이 발생한 장애물 위치(geometry 요약)를 명시합니다.\n"
-            "- 2번째 문장: 충돌 진입 횟수와 temporary 유형 장애물 식별자를 명시합니다.\n"
-            "- 3번째 문장: 다음 실행에서 그 위치/상황을 피하거나 더 짧게 분절해 재계획하는 조심점을 1개 제시합니다.\n"
-            "- 반드시 금지: '모든 도구 단계가 성공적으로 끝났습니다', '성공적으로 완료', '도구 호출이 있었으며', '총 N개의 도구' 같은 문구를 포함하지 마세요.\n"
-            "- 반드시 금지: tool step 성공/실패(예: all_success) 전반을 설명하려는 문장을 쓰지 마세요.\n"
-            "- 정확히 세 문장만 출력합니다. (다른 부가 문장/라벨 금지)\n"
-            "- 번호, 글머리표, 따옴표 장식 없이 평문만 사용합니다.\n"
-            "- 한국어로 작성합니다.\n\n"
-            "입력 요약(JSON):\n"
+            "당신의 역할은 turtle_agent의 단기 메모리 요약을 읽고 다음 세션에 활용할 교훈을 작성하는 운영 분석가입니다.\n"
+            "추측 없이 JSON 근거만으로 아래 내용을 작성하세요.\n"
+            "정확히 한국어 평문 3문장으로 작성하고, 번호/라벨/불릿은 금지합니다.\n"
+            "1줄: 유저 명령 요약 + 수행 여부.\n"
+            "2줄: 장애물 존재 여부 (있다면) 위치(geometry/zone 포함), (없다면) \"장애물이 존재하지 않습니다.\".\n"
+            "3줄: (장애물 있었으면) 다음 세션에서 적용할 회피 전략, (장애물이 없었으면) 현재 방식 유지 가능 여부.\n"
+            "금지: 도구 성공률/호출 수 일반론, tool step 전반 설명(all_success 등).\n"
+            "입력 JSON:\n"
             f"{ctx}"
         )
         llm = get_llm(streaming=False)
