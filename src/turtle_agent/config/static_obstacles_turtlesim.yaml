@@ -1,5 +1,15 @@
 # Turtlesim default window: x and y span [0, 11] (inclusive). Walls as four edges.
 # wet-*: side-1 AABB. a–d-point: circles diameter 0.5 (r=0.25) on inner corners; walls use segment-vs-disc checks.
+# GitHub #72: only walls + wet AABBs go into ObstacleStore; a–d markers stay in this
+# file for labels / docs but are not registered (no collision / list_obstacles noise).
+obstacle_store_include_ids:
+  - wall-south
+  - wall-east
+  - wall-north
+  - wall-west
+  - wet-top
+  - wet-right
+  - wet-bottom
 obstacles:
   - id: wall-south
     kind: static

@@ -32,6 +32,8 @@ from static_map_loader import (  # noqa: E402
     StaticMapLoadError,
     load_file,
     load_into_store,
+    obstacles_from_data_for_visual,
+    parse_map_file,
 )
 
 
@@ -250,7 +252,7 @@ class TestStaticMapLoader(unittest.TestCase):
         self.assertTrue(sample.is_file(), msg=f"missing {sample}")
         store = ObstacleStore()
         n = load_file(store, sample)
-        self.assertEqual(n, 11)
+        self.assertEqual(n, 7)
         ids = {o.id for o in store.snapshot()}
         self.assertEqual(
             ids,
@@ -262,16 +264,64 @@ class TestStaticMapLoader(unittest.TestCase):
                 "wet-top",
                 "wet-right",
                 "wet-bottom",
-                "a-point",
-                "b-point",
-                "c-point",
-                "d-point",
             },
         )
+        self.assertIsNone(store.get("a-point"))
         wet = store.get("wet-top")
         assert wet is not None
         self.assertEqual(wet.kind, "temporary")
         self.assertIsNotNone(wet.expires_at)
+
+        doc = parse_map_file(sample)
+        visual = obstacles_from_data_for_visual(doc, source=str(sample))
+        self.assertEqual(len(visual), 11)
+        self.assertEqual({o.id for o in visual}, ids | {"a-point", "b-point", "c-point", "d-point"})
+
+    def test_obstacle_store_include_ids_skips_unlisted(self):
+        store = ObstacleStore()
+        n = load_into_store(
+            store,
+            {
+                "obstacle_store_include_ids": ["w1", "w2"],
+                "obstacles": [
+                    {
+                        "id": "w1",
+                        "geometry": {"type": "circle", "cx": 0, "cy": 0, "r": 1},
+                    },
+                    {
+                        "id": "w2",
+                        "geometry": {"type": "circle", "cx": 1, "cy": 1, "r": 1},
+                    },
+                    {
+                        "id": "skip-me",
+                        "geometry": {"type": "circle", "cx": 9, "cy": 9, "r": 1},
+                    },
+                ],
+            },
+            source="inline",
+        )
+        self.assertEqual(n, 2)
+        self.assertIsNotNone(store.get("w1"))
+        self.assertIsNotNone(store.get("w2"))
+        self.assertIsNone(store.get("skip-me"))
+
+    def test_obstacle_store_include_ids_missing_id_raises(self):
+        store = ObstacleStore()
+        with self.assertRaises(StaticMapLoadError) as ctx:
+            load_into_store(
+                store,
+                {
+                    "obstacle_store_include_ids": ["only-this", "missing-from-doc"],
+                    "obstacles": [
+                        {
+                            "id": "only-this",
+                            "geometry": {"type": "circle", "cx": 0, "cy": 0, "r": 1},
+                        },
+                    ],
+                },
+                source="inline",
+            )
+        self.assertIn("missing-from-doc", str(ctx.exception))
 
 
 if __name__ == "__main__":
