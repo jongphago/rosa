@@ -14,6 +14,7 @@
 #  limitations under the License.
 
 import asyncio
+import math
 import os
 from pathlib import Path
 import signal
@@ -133,6 +134,24 @@ def _normalize_tool_args(raw_input: Any) -> Dict[str, Any]:
     return {"tool_input": raw_input}
 
 
+def _pose_snapshot_turtle_names(default_turtle_id: str) -> List[str]:
+    raw = rospy.get_param("~pose_snapshot_turtles", "turtle1,turtle2,turtle3")
+    if isinstance(raw, list):
+        return [
+            str(x).replace("/", "").strip()
+            for x in raw
+            if str(x).replace("/", "").strip()
+        ]
+    if isinstance(raw, str) and raw.strip():
+        return [
+            p.replace("/", "").strip()
+            for p in raw.split(",")
+            if p.replace("/", "").strip()
+        ]
+    tid = str(default_turtle_id).replace("/", "").strip()
+    return [tid] if tid else ["turtle1"]
+
+
 class TurtleAgent(ROSA):
 
     def __init__(
@@ -202,6 +221,35 @@ class TurtleAgent(ROSA):
             "clear": lambda: self.clear(),
             "reset": lambda: self.run_reset_command(),
         }
+
+    def _build_pose_snapshot_block(self) -> str:
+        """질의 직전 ROS pose를 읽어 LLM 컨텍스트에 넣는다 (헤딩·위치 기준 정렬용)."""
+        if not rospy.get_param("~pose_snapshot_for_llm", True):
+            return ""
+        names = _pose_snapshot_turtle_names(self._turtle_id)
+        lines: List[str] = []
+        for name in names:
+            try:
+                poses = turtle_tools.get_turtle_pose.invoke({"names": [name]})
+            except Exception as e:
+                rospy.logdebug("pose snapshot skip %s: %s", name, e)
+                continue
+            if not isinstance(poses, dict) or poses.get("Error"):
+                continue
+            msg = poses.get(name)
+            if msg is None:
+                continue
+            th = float(msg.theta)
+            lines.append(
+                f"- {name}: x={float(msg.x):.3f}, y={float(msg.y):.3f}, "
+                f"theta={th:.3f} rad ({math.degrees(th):.1f} deg)"
+            )
+        if not lines:
+            return ""
+        return (
+            "현재 거북이 pose (질의 직전 ROS에서 읽음; 토픽 예: /turtle1/pose). "
+            "cmd_vel 선속은 거북이 헤딩 기준 전방입니다:\n" + "\n".join(lines)
+        )
 
     def _record_agent_tool_steps(self, intermediate_steps: List[Tuple[Any, Any]]) -> None:
         """AgentExecutor intermediate_steps 에서 실제 호출된 도구 이름·인자를 command 로그에 남깁니다."""
@@ -386,6 +434,9 @@ class TurtleAgent(ROSA):
             query_parts.append(memory_context)
         if preprocess_block:
             query_parts.append(preprocess_block)
+        pose_block = self._build_pose_snapshot_block().strip()
+        if pose_block:
+            query_parts.append(pose_block)
         query_parts.append(f"User query:\n{normalized_query}")
         effective_query = "\n\n".join(query_parts)
         rospy.loginfo(
