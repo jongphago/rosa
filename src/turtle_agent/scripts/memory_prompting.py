@@ -273,7 +273,10 @@ def build_memory_context(query: str, records: List[Dict[str, Any]], top_k: int =
             if isinstance(collision_obstacle_geometries, list) and collision_obstacle_geometries:
                 geom0 = str(collision_obstacle_geometries[0])
                 loc_sentence = f"충돌이 발생한 장애물 위치는 {geom0} 부근입니다."
-                if not any(("장애물 위치" in l) or (geom0 in l) for l in kept_lessons):
+                if not any(
+                    ("장애물 위치" in lesson_text) or (geom0 in lesson_text)
+                    for lesson_text in kept_lessons
+                ):
                     kept_lessons.insert(0, loc_sentence)
 
             for lesson in kept_lessons:
@@ -281,11 +284,14 @@ def build_memory_context(query: str, records: List[Dict[str, Any]], top_k: int =
                     dont_lines.append(f"[memory {idx}] {lesson}")
                 else:
                     do_lines.append(f"[memory {idx}] {lesson}")
-    policy_lines = ["MUST: Use selected memory as execution policy, not commentary."]
-    if query_ctx.get("task_family") == "navigate":
-        policy_lines.append("MUST: Avoid single long straight moves when uncertainty exists.")
+    policy_lines = [
+        "Use selected memory as execution evidence for this query.",
+        "Do not introduce strategies that are absent from selected memory.",
+    ]
     if dont_lines:
-        policy_lines.append("MUST: Treat DON'T items as forbidden patterns for this query.")
+        policy_lines.append(
+            "Treat DON'T items as constraints only when their stated conditions match."
+        )
     policy_lines = [
         line for line in policy_lines if line.strip()
     ]
