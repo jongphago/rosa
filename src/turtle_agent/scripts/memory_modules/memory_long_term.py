@@ -279,27 +279,37 @@ def lessons_context_payload(
     first_goal: str,
     queries: List[str],
 ) -> Dict[str, Any]:
-    goals = []
-    seen: set[str] = set()
-    for q in [first_goal] + queries:
-        g = str(q).strip()
-        if g and g not in seen:
-            seen.add(g)
-            goals.append(g)
-    skills_used: List[str] = []
-    sk_seen: set[str] = set()
-    for item in action_trace:
-        sk = str(item.get("skill", "")).strip()
-        if sk and sk not in sk_seen:
-            sk_seen.add(sk)
-            skills_used.append(sk)
+    # lessons 생성에는 "핵심 충돌 요약"만 필요하므로 입력 컨텍스트를 최소화한다.
+    goal_primary = str(first_goal or "").strip()
+    goal_latest = ""
+    for q in queries:
+        text = str(q or "").strip()
+        if text:
+            goal_latest = text
+    if goal_latest == goal_primary:
+        goal_latest = ""
+
+    temporary_ids = collision_ev.get("collision_temporary_obstacles") or []
+    if not isinstance(temporary_ids, list):
+        temporary_ids = []
+    temporary_ids = [str(x).strip() for x in temporary_ids if str(x).strip()][:5]
+
+    # geometry는 문자열이 길어지기 쉬워 개수와 길이를 함께 제한한다.
+    geometry_brief: List[str] = []
+    for item in collision_obstacle_geometries[:3]:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        geometry_brief.append(text[:120])
+
     return {
         "task_family": task_family,
-        "goals": goals,
-        "collision": dict(collision_ev),
-        # 장애물 geometry/좌표 요약을 lessons 생성에 함께 제공(최소 텍스트)
-        "collision_obstacle_geometries": collision_obstacle_geometries[:8],
-        "skills_used": skills_used[:40],
+        "goal_primary": goal_primary,
+        "goal_latest": goal_latest,
+        "collision_enter_count": int(collision_ev.get("collision_enter_count", 0)),
+        "collision_temporary_obstacles": temporary_ids,
+        # 장애물 geometry/좌표 요약을 lessons 생성에 함께 제공(길이 제한)
+        "collision_obstacle_geometries": geometry_brief,
     }
 
 
