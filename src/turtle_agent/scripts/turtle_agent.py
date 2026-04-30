@@ -17,6 +17,7 @@ import asyncio
 import math
 import os
 from pathlib import Path
+import shutil
 import signal
 import sys
 import threading
@@ -220,14 +221,12 @@ class TurtleAgent(ROSA):
             "examples": lambda: self.submit(self.choose_example()),
             "clear": lambda: self.clear(),
             "reset": lambda: self.run_reset_command(),
+            "clean_memory": lambda: self.run_clean_memory_command(),
         }
 
-    def _build_pose_snapshot_block(self) -> str:
-        """질의 직전 ROS pose를 읽어 LLM 컨텍스트에 넣는다 (헤딩·위치 기준 정렬용)."""
-        if not rospy.get_param("~pose_snapshot_for_llm", True):
-            return ""
+    def _read_pose_snapshot(self) -> Dict[str, Dict[str, float]]:
+        snapshot: Dict[str, Dict[str, float]] = {}
         names = _pose_snapshot_turtle_names(self._turtle_id)
-        lines: List[str] = []
         for name in names:
             try:
                 poses = turtle_tools.get_turtle_pose.invoke({"names": [name]})
@@ -239,9 +238,23 @@ class TurtleAgent(ROSA):
             msg = poses.get(name)
             if msg is None:
                 continue
-            th = float(msg.theta)
+            snapshot[name] = {
+                "x": float(msg.x),
+                "y": float(msg.y),
+                "theta": float(msg.theta),
+            }
+        return snapshot
+
+    def _build_pose_snapshot_block(self, snapshot: Dict[str, Dict[str, float]]) -> str:
+        """질의 직전 ROS pose를 읽어 LLM 컨텍스트에 넣는다 (헤딩·위치 기준 정렬용)."""
+        if not rospy.get_param("~pose_snapshot_for_llm", True):
+            return ""
+        lines: List[str] = []
+        for name in sorted(snapshot):
+            pose = snapshot[name]
+            th = float(pose["theta"])
             lines.append(
-                f"- {name}: x={float(msg.x):.3f}, y={float(msg.y):.3f}, "
+                f"- {name}: x={float(pose['x']):.3f}, y={float(pose['y']):.3f}, "
                 f"theta={th:.3f} rad ({math.degrees(th):.1f} deg)"
             )
         if not lines:
@@ -249,6 +262,63 @@ class TurtleAgent(ROSA):
         return (
             "현재 거북이 pose (질의 직전 ROS에서 읽음; 토픽 예: /turtle1/pose). "
             "cmd_vel 선속은 거북이 헤딩 기준 전방입니다:\n" + "\n".join(lines)
+        )
+
+    def _build_navigate_rule_block(
+        self, preprocess: Dict[str, Any], snapshot: Dict[str, Dict[str, float]]
+    ) -> str:
+        """navigate 질의에 대해 최단 직선 우선 기본 정책을 강한 규칙으로 주입."""
+        if str(preprocess.get("intent", "")) != "navigate":
+            return ""
+        slots = preprocess.get("slots", {}) if isinstance(preprocess, dict) else {}
+        if not isinstance(slots, dict):
+            return ""
+        turtle_name = str(slots.get("turtle") or self._turtle_id).replace("/", "").strip()
+        if not turtle_name:
+            turtle_name = "turtle1"
+
+        start_xy = slots.get("from_xy")
+        if not (
+            isinstance(start_xy, tuple)
+            and len(start_xy) == 2
+            and all(isinstance(v, (int, float)) for v in start_xy)
+        ):
+            pose = snapshot.get(turtle_name)
+            if pose is not None:
+                start_xy = (float(pose["x"]), float(pose["y"]))
+
+        goal_xy = slots.get("to_xy")
+        if not (
+            isinstance(goal_xy, tuple)
+            and len(goal_xy) == 2
+            and all(isinstance(v, (int, float)) for v in goal_xy)
+        ):
+            return ""
+        if not (
+            isinstance(start_xy, tuple)
+            and len(start_xy) == 2
+            and all(isinstance(v, (int, float)) for v in start_xy)
+        ):
+            return ""
+
+        sx, sy = float(start_xy[0]), float(start_xy[1])
+        gx, gy = float(goal_xy[0]), float(goal_xy[1])
+        dx, dy = gx - sx, gy - sy
+        distance = math.sqrt(dx * dx + dy * dy)
+        heading = math.atan2(dy, dx)
+
+        return (
+            "Rule-based navigate contract (MUST):\n"
+            f"- turtle={turtle_name}, start=({sx:.3f},{sy:.3f}), goal=({gx:.3f},{gy:.3f})\n"
+            f"- vector dx={dx:.3f}, dy={dy:.3f}, distance={distance:.3f}, heading={heading:.3f} rad\n"
+            "- 기본 정책(장애물 정보가 아직 없을 때): 최단 직선 1개 구간을 우선 시도한다.\n"
+            "- 반드시 이 순서로 판단한다:\n"
+            "  1) list_obstacles\n"
+            "  2) get_avoid_rectangles\n"
+            "  3) check_path_against_obstacles(start->goal)\n"
+            "  4) safe=true면 draw_line_segment(turtle,start,goal)\n"
+            "  5) safe=false면 avoid_rectangles 기반으로 구간 분할 draw_line_segment\n"
+            "- move/이동 질의에서는 불필요한 재질문 대신 위 계약을 먼저 실행한다."
         )
 
     def _record_agent_tool_steps(self, intermediate_steps: List[Tuple[Any, Any]]) -> None:
@@ -306,6 +376,10 @@ class TurtleAgent(ROSA):
         greeting.append(
             f"Try {', '.join(self.command_handler.keys())} or exit.",
             style="italic",
+        )
+        greeting.append(
+            "\nQuick commands: reset (시뮬레이터 초기화), clean_memory (short_term/long_term 삭제)",
+            style="dim",
         )
         return greeting
 
@@ -415,6 +489,59 @@ class TurtleAgent(ROSA):
             self.command_handler["info"] = self.show_event_details
             console.print(f"[red]reset command failed: {e}[/red]")
 
+    async def run_clean_memory_command(self):
+        """Delete short_term and long_term memory directories."""
+        console = Console()
+        short_dir = self._memory_root / "short_term"
+        long_dir = self._memory_root / "long_term"
+        targets = [short_dir, long_dir]
+        removed: List[str] = []
+        try:
+            for target in targets:
+                if target.exists():
+                    shutil.rmtree(target)
+                    removed.append(str(target))
+                target.mkdir(parents=True, exist_ok=True)
+            result = (
+                "Memory cleanup completed.\n"
+                f"- short_term: {short_dir}\n"
+                f"- long_term: {long_dir}"
+            )
+            self.last_user_query = "clean_memory"
+            self.last_events = [
+                {
+                    "type": "tool_start",
+                    "name": "clean_memory",
+                    "input": {"targets": [str(short_dir), str(long_dir)]},
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                },
+                {
+                    "type": "tool_end",
+                    "name": "clean_memory",
+                    "output": result,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                },
+            ]
+            self.command_handler["info"] = self.show_event_details
+            console.print(
+                Panel(
+                    Markdown(result + "\n\nType `info` for clean_memory execution details."),
+                    title="Clean Memory Command",
+                    border_style="green",
+                )
+            )
+        except Exception as e:
+            self.last_user_query = "clean_memory"
+            self.last_events = [
+                {
+                    "type": "error",
+                    "content": f"clean_memory command failed: {e}",
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                }
+            ]
+            self.command_handler["info"] = self.show_event_details
+            console.print(f"[red]clean_memory command failed: {e}[/red]")
+
     async def submit(self, query: str):
         self.last_user_query = query
         self.last_events = []
@@ -429,12 +556,16 @@ class TurtleAgent(ROSA):
                 normalized_query, long_records, top_k=3
             )
         preprocess_block = str(preprocess.get("preprocessing_block", "")).strip()
+        snapshot = self._read_pose_snapshot()
         query_parts: List[str] = []
         if memory_context:
             query_parts.append(memory_context)
         if preprocess_block:
             query_parts.append(preprocess_block)
-        pose_block = self._build_pose_snapshot_block().strip()
+        navigate_rule_block = self._build_navigate_rule_block(preprocess, snapshot).strip()
+        if navigate_rule_block:
+            query_parts.append(navigate_rule_block)
+        pose_block = self._build_pose_snapshot_block(snapshot).strip()
         if pose_block:
             query_parts.append(pose_block)
         query_parts.append(f"User query:\n{normalized_query}")
@@ -487,12 +618,13 @@ class TurtleAgent(ROSA):
                 session_id=self._command_logger.session_id,
                 turtle_id=self._turtle_id,
                 test_case_id=f"tc-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}",
-                write_long_term=False,
+                write_long_term=True,
                 mode=self._agent_mode,
             )
             rospy.loginfo(
-                "memory conversion completed: short=%s",
+                "memory conversion completed: short=%s long=%s",
                 conversion.get("short_term_written", 0),
+                conversion.get("long_term_written", 0),
             )
         except Exception as e:
             rospy.logwarn("memory conversion skipped: %s", e)
