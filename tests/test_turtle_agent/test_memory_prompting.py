@@ -7,6 +7,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPTS = _REPO_ROOT / "src" / "turtle_agent" / "scripts"
 sys.path.insert(0, str(_SCRIPTS))
 
+from memory_modules.memory_long_term import fallback_lessons_lines  # noqa: E402
 from memory_prompting import (  # noqa: E402
     build_memory_context,
     infer_query_context,
@@ -89,7 +90,8 @@ class TestMemoryPrompting(unittest.TestCase):
         self.assertIn("A to B with detour", context)
         self.assertNotIn("B to A direct", context)
         self.assertIn("Memory policy (strict):", context)
-        self.assertIn("MUST: Do not choose a single straight-line path", context)
+        self.assertNotIn("Avoid single long straight moves", context)
+        self.assertNotIn("Do not choose a single straight-line path", context)
 
     def test_build_memory_context_includes_lessons_when_present(self):
         records = [
@@ -101,6 +103,7 @@ class TestMemoryPrompting(unittest.TestCase):
                         "intent_norm": {"task_family": "navigate", "slots": {}},
                     },
                     "evidence": {"collision_enter_count": 0, "success_rate": 1.0},
+                    "outcome": {"success": True},
                     "lessons": [
                         "첫 번째 교훈입니다.",
                         "두 번째 교훈입니다.",
@@ -111,9 +114,31 @@ class TestMemoryPrompting(unittest.TestCase):
         ]
         context, hits = build_memory_context("go to 2, 3", records, top_k=1)
         self.assertEqual(hits, 1)
-        self.assertIn("Memory lessons:", context)
+        self.assertIn("DO rules:", context)
         self.assertIn("[memory 1]", context)
         self.assertIn("첫 번째 교훈입니다.", context)
+
+    def test_build_memory_context_does_not_create_strategy_from_task_family_only(self):
+        records = [
+            {
+                "turtle_id": "turtle1",
+                "payload": {
+                    "operation": {
+                        "nl_goal": {"text": "go to 1, 5"},
+                        "intent_norm": {"task_family": "navigate", "slots": {}},
+                    },
+                    "evidence": {"collision_enter_count": 0, "success_rate": 1.0},
+                },
+            },
+        ]
+
+        context, hits = build_memory_context("go to 2, 3", records, top_k=1)
+
+        self.assertEqual(hits, 1)
+        self.assertIn("Memory policy (strict):", context)
+        self.assertNotIn("Avoid single long straight moves", context)
+        self.assertNotIn("Do not choose a single straight-line path", context)
+        self.assertNotIn("check_path_against_obstacles", context)
 
     def test_load_long_term_records_filters_by_turtle(self):
         with tempfile.TemporaryDirectory() as td:
@@ -129,6 +154,35 @@ class TestMemoryPrompting(unittest.TestCase):
             rows = load_long_term_records(memory_root, "turtle1")
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["turtle_id"], "turtle1")
+
+    def test_fallback_lessons_without_collision_does_not_create_avoidance_policy(self):
+        lines = fallback_lessons_lines(
+            collision_ev={"collision_enter_count": 0},
+            collision_obstacle_geometries=[],
+            task_family="navigate",
+            first_goal="go to 1, 5",
+            action_trace=[],
+        )
+
+        self.assertEqual(len(lines), 3)
+        self.assertIn("추가 회피, 분절, 재계획 정책을 만들 근거가 없습니다", lines[2])
+
+    def test_fallback_lessons_with_collision_is_condition_scoped(self):
+        lines = fallback_lessons_lines(
+            collision_ev={
+                "collision_enter_count": 1,
+                "collision_obstacles": ["wet"],
+                "collision_temporary_obstacles": ["wet"],
+            },
+            collision_obstacle_geometries=["wet:aabb(1,2,3,4)"],
+            task_family="navigate",
+            first_goal="go to 1, 5",
+            action_trace=[],
+        )
+
+        self.assertEqual(len(lines), 3)
+        self.assertIn("동일한 목표와 장애물 조건이 재현될 때만", lines[2])
+        self.assertNotIn("항상", "\n".join(lines))
 
 
 if __name__ == "__main__":

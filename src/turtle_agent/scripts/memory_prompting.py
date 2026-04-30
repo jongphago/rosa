@@ -197,43 +197,6 @@ def _record_sort_tuple(score: int, record_ctx: Dict[str, Any], row: Dict[str, An
     return (score, _slot_specificity(record_ctx), collisions, -success_rate, created_at)
 
 
-def _extract_temporary_aabb_zones(
-    evidence: Dict[str, Any],
-) -> List[Tuple[str, float, float, float, float]]:
-    geoms = evidence.get("collision_obstacle_geometries") or []
-    temporary_ids = {
-        str(x).strip()
-        for x in (evidence.get("collision_temporary_obstacles") or [])
-        if str(x).strip()
-    }
-    out: List[Tuple[str, float, float, float, float]] = []
-    if not isinstance(geoms, list):
-        return out
-    for item in geoms:
-        text = str(item or "").strip()
-        if not text or ":" not in text:
-            continue
-        oid, geom = text.split(":", 1)
-        oid = oid.strip()
-        if temporary_ids and oid not in temporary_ids:
-            continue
-        m = re.search(
-            r"aabb\(min_x=([-\d.]+),min_y=([-\d.]+),max_x=([-\d.]+),max_y=([-\d.]+)\)",
-            geom,
-        )
-        if not m:
-            continue
-        try:
-            min_x = float(m.group(1))
-            min_y = float(m.group(2))
-            max_x = float(m.group(3))
-            max_y = float(m.group(4))
-        except ValueError:
-            continue
-        out.append((oid, min_x, min_y, max_x, max_y))
-    return out
-
-
 def build_memory_context(query: str, records: List[Dict[str, Any]], top_k: int = 3) -> Tuple[str, int]:
     query_ctx = infer_query_context(query)
     max_k = max(0, int(top_k))
@@ -259,7 +222,7 @@ def build_memory_context(query: str, records: List[Dict[str, Any]], top_k: int =
     ranked = sorted(deduped.values(), key=lambda item: item[0], reverse=True)
     selected = ranked[: min(max_k, len(ranked))]
     lines: List[str] = []
-    success_lines: List[str] = []
+    do_lines: List[str] = []
     dont_lines: List[str] = []
     for idx, (_, row, quality, _, score) in enumerate(selected, start=1):
         payload = row.get("payload", {})
@@ -269,10 +232,22 @@ def build_memory_context(query: str, records: List[Dict[str, Any]], top_k: int =
         collisions = _safe_int(evidence.get("collision_enter_count"), 0)
         success_rate = _safe_float(evidence.get("success_rate"))
 
+        collision_obstacles = evidence.get("collision_obstacles") or []
+        obstacle_ids = (
+            ", ".join(str(x) for x in collision_obstacles[:3]) if collision_obstacles else "없음"
+        )
+
+        collision_hotspots = evidence.get("collision_hotspots") or []
         collision_obstacle_geometries = evidence.get("collision_obstacle_geometries") or []
-        goal_snippet = goal_text[:40]
+        location_tail = ""
+        if isinstance(collision_hotspots, list) and collision_hotspots:
+            location_tail = f" / collision_hotspots={collision_hotspots[:2]}"
+        elif isinstance(collision_obstacle_geometries, list) and collision_obstacle_geometries:
+            location_tail = f" / collision_obstacle_geometries={collision_obstacle_geometries[:2]}"
+
+        goal_snippet = goal_text[:60]
         lines.append(
-            f"{idx}. goal={goal_snippet} / enter={collisions}"
+            f"{idx}. goal={goal_snippet} / collision_enter_count={collisions} / collision_obstacles={obstacle_ids} / success_rate={success_rate}{location_tail}"
         )
         raw_lessons = payload.get("lessons")
         if isinstance(raw_lessons, list):
@@ -298,37 +273,34 @@ def build_memory_context(query: str, records: List[Dict[str, Any]], top_k: int =
             if isinstance(collision_obstacle_geometries, list) and collision_obstacle_geometries:
                 geom0 = str(collision_obstacle_geometries[0])
                 loc_sentence = f"충돌이 발생한 장애물 위치는 {geom0} 부근입니다."
-                if not any(("장애물 위치" in l) or (geom0 in l) for l in kept_lessons):
+                if not any(
+                    ("장애물 위치" in lesson_text) or (geom0 in lesson_text)
+                    for lesson_text in kept_lessons
+                ):
                     kept_lessons.insert(0, loc_sentence)
 
             for lesson in kept_lessons:
                 if quality == "low":
-                    dont_lines.append(lesson)
+                    dont_lines.append(f"[memory {idx}] {lesson}")
                 else:
-                    success_lines.append(lesson)
-    policy_lines = ["MUST: Use selected memory as execution policy, not commentary."]
-    if query_ctx.get("task_family") == "navigate":
-        policy_lines.append(
-            "MUST: Apply lessons while planning obstacle-aware segmented movement."
-        )
+                    do_lines.append(f"[memory {idx}] {lesson}")
+    policy_lines = [
+        "Use selected memory as execution evidence for this query.",
+        "Do not introduce strategies that are absent from selected memory.",
+    ]
     if dont_lines:
         policy_lines.append(
-            "MUST: Apply failure-case lessons as cautionary guidance for this query."
+            "Treat DON'T items as constraints only when their stated conditions match."
         )
     policy_lines = [
         line for line in policy_lines if line.strip()
     ]
     context = "Memory policy (strict):\n"
     context += "\n".join(f"- {line}" for line in policy_lines)
-    if lines:
-        context += "\n\nMemory evidence:\n"
-        context += "\n".join(lines[:1])
-    if success_lines:
-        context += "\n\nSuccess-case lessons:\n" + "\n".join(
-            f"- {line}" for line in success_lines[:3]
-        )
+    context += "\n\nMemory evidence:\n"
+    context += "\n".join(lines)
+    if do_lines:
+        context += "\n\nDO rules:\n" + "\n".join(f"- {line}" for line in do_lines[:6])
     if dont_lines:
-        context += "\n\nFailure-case lessons:\n" + "\n".join(
-            f"- {line}" for line in dont_lines[:3]
-        )
+        context += "\n\nDON'T rules:\n" + "\n".join(f"- {line}" for line in dont_lines[:6])
     return context, len(selected)
