@@ -34,6 +34,7 @@ from collision_event_sink import make_collision_event_sink
 from collision_monitor import CollisionMonitor
 from command_logger import CommandLogger
 from help import get_help
+from ko_query_router import preprocess_korean_query
 from langchain.agents import Tool, tool
 
 # from langchain_ollama import ChatOllama
@@ -369,15 +370,24 @@ class TurtleAgent(ROSA):
     async def submit(self, query: str):
         self.last_user_query = query
         self.last_events = []
-        query_ctx = infer_query_context(query)
+        preprocess = preprocess_korean_query(query)
+        normalized_query = str(preprocess.get("normalized_query", query))
+        query_ctx = infer_query_context(normalized_query)
         memory_context = ""
         memory_hits = 0
         if self._agent_mode.strip().lower() == "single":
             long_records = load_long_term_records(self._memory_root, self._turtle_id)
-            memory_context, memory_hits = build_memory_context(query, long_records, top_k=3)
-        effective_query = (
-            f"{memory_context}\n\nUser query:\n{query}" if memory_context else query
-        )
+            memory_context, memory_hits = build_memory_context(
+                normalized_query, long_records, top_k=3
+            )
+        preprocess_block = str(preprocess.get("preprocessing_block", "")).strip()
+        query_parts: List[str] = []
+        if memory_context:
+            query_parts.append(memory_context)
+        if preprocess_block:
+            query_parts.append(preprocess_block)
+        query_parts.append(f"User query:\n{normalized_query}")
+        effective_query = "\n\n".join(query_parts)
         rospy.loginfo(
             "memory prompt: mode=%s hits=%s experience_key=%s",
             self._agent_mode,
@@ -389,8 +399,8 @@ class TurtleAgent(ROSA):
             {
                 "task_family": str(query_ctx.get("task_family", "natural_language_query")),
                 "slots": query_ctx.get("slots", {}),
-                "natural_language": query,
-                "query": query,
+                "natural_language": normalized_query,
+                "query": normalized_query,
                 "memory_hits": memory_hits,
                 "experience_key": query_ctx.get("experience_key", ""),
             },
@@ -408,8 +418,14 @@ class TurtleAgent(ROSA):
             skill="rosa_response",
             args={
                 "query": query,
+                "normalized_query": normalized_query,
                 "memory_hits": memory_hits,
                 "experience_key": query_ctx.get("experience_key", ""),
+                "korean_preprocess": {
+                    "intent": str(preprocess.get("intent", "")),
+                    "confidence": float(preprocess.get("confidence", 0.0)),
+                    "slots": preprocess.get("slots", {}),
+                },
             },
             status="success",
             result=str(response),
