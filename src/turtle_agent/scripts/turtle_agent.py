@@ -591,6 +591,16 @@ class TurtleAgent(ROSA):
             response = await self.stream_response(effective_query)
         else:
             response = self.print_response(effective_query)
+        # Keep per-turn memory/policy injection for current reasoning,
+        # but avoid persisting the expanded prompt into chat history.
+        if effective_query != normalized_query:
+            try:
+                for msg in reversed(self.chat_history):
+                    if getattr(msg, "content", None) == effective_query:
+                        msg.content = normalized_query
+                        break
+            except Exception as e:
+                rospy.logdebug("chat history normalization skipped: %s", e)
         if self.last_events:
             self.command_handler["info"] = self.show_event_details
         else:
