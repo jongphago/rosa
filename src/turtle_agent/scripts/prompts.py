@@ -31,8 +31,8 @@ def get_prompts():
         "\n"
         "NAVIGATION MUST:\n"
         "Before navigation, use current pose/heading and do not assume +x facing.\n"
-        "For obstacle-prone routes: list/check obstacles first, then move with segmented draw_line_segment.\n"
-        "Avoid single long direct moves.\n"
+        "Do not introduce task-specific navigation strategies unless they come "
+        "from the user request, selected memory, or verified observations.\n"
         "\n"
         "RESET:\n"
         "If reset_turtlesim is used, make it the final tool call in that response.\n"
@@ -44,8 +44,8 @@ def get_prompts():
         "\n"
         "NAVIGATION CONTRACT:\n"
         "1) Check pose/heading.\n"
-        "2) Align heading.\n"
-        "3) Move in short segments.\n"
+        "2) Align heading when required by the chosen movement.\n"
+        "3) Execute the chosen movement command.\n"
         "If movement looks opposite/backward, stop and re-check pose.\n"
         "\n"
         "ERROR:\n"
@@ -58,8 +58,7 @@ def get_prompts():
         "All moves are relative to the current pose of the turtle and the direction it is facing. ",
         about_your_capabilities="PREFERRED TOOLS:\n"
         "Use draw_line_segment, draw_rectangle, draw_polyline as first choice.\n"
-        "For obstacle-aware navigation, prefer list_obstacles/check_path_against_obstacles before movement.\n"
-        "Use low-level twist/cmd_vel only when necessary and keep segments short.\n"
+        "Use low-level twist/cmd_vel only when necessary.\n"
         "Other controls: teleport_relative, set_pen, clear_turtlesim(background apply).",
         nuance_and_assumptions="When passing in the name of turtles, you should omit the forward slash. "
         "The new pose will always be returned after a twist or teleport command.",

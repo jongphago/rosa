@@ -279,37 +279,27 @@ def lessons_context_payload(
     first_goal: str,
     queries: List[str],
 ) -> Dict[str, Any]:
-    # lessons 생성에는 "핵심 충돌 요약"만 필요하므로 입력 컨텍스트를 최소화한다.
-    goal_primary = str(first_goal or "").strip()
-    goal_latest = ""
-    for q in queries:
-        text = str(q or "").strip()
-        if text:
-            goal_latest = text
-    if goal_latest == goal_primary:
-        goal_latest = ""
-
-    temporary_ids = collision_ev.get("collision_temporary_obstacles") or []
-    if not isinstance(temporary_ids, list):
-        temporary_ids = []
-    temporary_ids = [str(x).strip() for x in temporary_ids if str(x).strip()][:5]
-
-    # geometry는 문자열이 길어지기 쉬워 개수와 길이를 함께 제한한다.
-    geometry_brief: List[str] = []
-    for item in collision_obstacle_geometries[:3]:
-        text = str(item or "").strip()
-        if not text:
-            continue
-        geometry_brief.append(text[:120])
-
+    goals = []
+    seen: set[str] = set()
+    for q in [first_goal] + queries:
+        g = str(q).strip()
+        if g and g not in seen:
+            seen.add(g)
+            goals.append(g)
+    skills_used: List[str] = []
+    sk_seen: set[str] = set()
+    for item in action_trace:
+        sk = str(item.get("skill", "")).strip()
+        if sk and sk not in sk_seen:
+            sk_seen.add(sk)
+            skills_used.append(sk)
     return {
         "task_family": task_family,
-        "goal_primary": goal_primary,
-        "goal_latest": goal_latest,
-        "collision_enter_count": int(collision_ev.get("collision_enter_count", 0)),
-        "collision_temporary_obstacles": temporary_ids,
-        # 장애물 geometry/좌표 요약을 lessons 생성에 함께 제공(길이 제한)
-        "collision_obstacle_geometries": geometry_brief,
+        "goals": goals,
+        "collision": dict(collision_ev),
+        # 장애물 geometry/좌표 요약을 lessons 생성에 함께 제공(최소 텍스트)
+        "collision_obstacle_geometries": collision_obstacle_geometries[:8],
+        "skills_used": skills_used[:40],
     }
 
 
@@ -326,24 +316,28 @@ def fallback_lessons_lines(
     obstacles = temporary_obstacles or collision_ev.get("collision_obstacles") or []
     obs_txt = ", ".join(str(x) for x in obstacles[:5]) if obstacles else "없음"
     line1 = (
-        f"이번 세션의 주요 목표는 「{first_goal[:120]}」이며 "
-        f"작업 유형은 {task_family}로 분류되었습니다."
+        f"적용 조건은 주요 목표 「{first_goal[:120]}」와 "
+        f"작업 유형 {task_family}가 유사한 경우입니다."
     )
     if enters > 0:
         line2 = (
-            f"장애물 구간에서 충돌 진입이 {enters}회 기록되었고 "
+            f"관찰 근거로 장애물 구간 충돌 진입이 {enters}회 기록되었고 "
             f"관련 장애물 식별자는 {obs_txt}입니다."
         )
     else:
-        line2 = "기록된 충돌 진입은 없었고, 주행 중 장애물 관통 이벤트도 집계되지 않았습니다."
-    # (중요) 도구 성공 여부/호출 수 같은 문구는 lessons에서 제거하고,
-    # 장애물 위치(geometry) 기반으로 다음 행동 조심점을 더 직접적으로 전달합니다.
-    geom_tail = ""
-    if collision_obstacle_geometries:
-        geom_tail = f"충돌이 발생한 장애물 위치는 {collision_obstacle_geometries[0]} 부근입니다."
+        line2 = "관찰 근거로 기록된 충돌 진입은 없고 장애물 관통 이벤트도 집계되지 않았습니다."
+    if enters > 0 and collision_obstacle_geometries:
+        line3 = (
+            "동일한 목표와 장애물 조건이 재현될 때만 "
+            f"{collision_obstacle_geometries[0]} 위치 정보를 실행 판단 근거로 참고할 수 있습니다."
+        )
+    elif enters > 0:
+        line3 = (
+            "동일한 목표와 장애물 조건이 재현될 때만 "
+            "식별된 충돌 장애물을 실행 판단 근거로 참고할 수 있습니다."
+        )
     else:
-        geom_tail = "충돌이 발생한 장애물 위치는 식별은 되었지만 좌표/형상 정보가 제한적입니다."
-    line3 = geom_tail
+        line3 = "이 기록만으로는 추가 회피, 분절, 재계획 정책을 만들 근거가 없습니다."
     return [line1, line2, line3]
 
 
@@ -386,14 +380,28 @@ def summarize_lessons_with_llm(
             ctx = ctx[:12000] + "\n…(truncated)"
 
         prompt = (
-            "당신의 역할은 turtle_agent의 단기 메모리 요약을 읽고 다음 세션에 활용할 교훈을 작성하는 운영 분석가입니다.\n"
-            "추측 없이 JSON 근거만으로 아래 내용을 작성하세요.\n"
-            "정확히 한국어 평문 3문장으로 작성하고, 번호/라벨/불릿은 금지합니다.\n"
-            "1줄: 유저 명령 요약 + 수행 여부.\n"
-            "2줄: 장애물 존재 여부 (있다면) 위치(geometry/zone 포함), (없다면) \"장애물이 존재하지 않습니다.\".\n"
-            "3줄: (장애물 있었으면) 다음 세션에서 적용할 회피 전략, (장애물이 없었으면) 현재 방식 유지 가능 여부.\n"
-            "금지: 도구 성공률/호출 수 일반론, tool step 전반 설명(all_success 등).\n"
-            "입력 JSON:\n"
+            "당신은 turtle_agent의 단기 메모리(short-term) 요약을 읽고 "
+            "같은 조건의 다음 실행에서 참고할 조건부 기억만 추립니다.\n\n"
+            "규칙:\n"
+            "- 단기 기록에서 실제로 나타난 목표·행동·충돌·장애물 geometry만 근거로 씁니다.\n"
+            "- 관찰되지 않은 위험, 장애물, 사용자 의도, 문제 해결 전략을 새로 만들지 마세요.\n"
+            "- 모든 임무에 적용되는 보편 안전 규칙이나 도구 호출 규칙을 만들지 마세요.\n"
+            "- 출력은 반드시 3문장 구성으로 하며, 각 문장은 한 줄에 하나씩입니다.\n"
+            "- 1번째 문장: 이 기억이 적용될 목표/작업 조건을 씁니다.\n"
+            "- 2번째 문장: 실제 관찰된 충돌 횟수, 장애물 식별자, geometry 근거를 씁니다.\n"
+            "- 3번째 문장: 같은 조건이 재현될 때 참고할 조건부 실행 정책을 씁니다.\n"
+            "- 3번째 문장은 evidence가 직접 지지하는 내용만 허용합니다. "
+            "근거가 부족하면 추가 정책을 만들 근거가 없다고 씁니다.\n"
+            "- '항상', '반드시', '모든 이동', '모든 장애물'처럼 조건을 지우는 표현을 쓰지 마세요.\n"
+            "- 반드시 금지: '모든 도구 단계가 성공적으로 끝났습니다', "
+            "'성공적으로 완료', '도구 호출이 있었으며', "
+            "'총 N개의 도구' 같은 문구를 포함하지 마세요.\n"
+            "- 반드시 금지: tool step 성공/실패(예: all_success) 전반을 "
+            "설명하려는 문장을 쓰지 마세요.\n"
+            "- 정확히 세 문장만 출력합니다. (다른 부가 문장/라벨 금지)\n"
+            "- 번호, 글머리표, 따옴표 장식 없이 평문만 사용합니다.\n"
+            "- 한국어로 작성합니다.\n\n"
+            "입력 요약(JSON):\n"
             f"{ctx}"
         )
         llm = get_llm(streaming=False)

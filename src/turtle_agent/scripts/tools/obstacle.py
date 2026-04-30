@@ -428,11 +428,13 @@ def check_path_against_obstacles(
     obstacle_kinds: str = "temporary",
 ) -> str:
     """
-    Check whether a straight turtle movement segment would collide with obstacles.
+    Evaluate a candidate straight-line turtle movement segment against obstacles.
 
-    Use this before moving through ``publish_twist_to_cmd_vel`` when the user asks
-    to avoid obstacles. ``obstacle_kinds`` is a comma-separated filter such as
-    ``temporary`` or ``temporary,static``.
+    The inputs describe a proposed segment, turtle clearance, and obstacle kinds
+    to include. The result is structured JSON that reports geometric
+    intersections with the configured obstacle registry. This tool does not infer
+    user intent, decide whether obstacle validation is required, plan detours, or
+    execute movement commands.
     """
     try:
         start_x = _coerce_float(x1, "x1")
@@ -487,9 +489,12 @@ def check_path_against_obstacles(
                 "checked_kinds": sorted(kinds),
                 "blocked_by": blocked_by,
                 "recommendation": (
-                    "Proceed with this segment."
+                    "Candidate segment has no matching obstacle intersections."
                     if not blocked_by
-                    else "Do not execute this segment; replan around blocked_by obstacles."
+                    else (
+                        "Candidate segment intersects registered obstacles; "
+                        "caller decides next action."
+                    )
                 ),
             },
             ensure_ascii=False,
