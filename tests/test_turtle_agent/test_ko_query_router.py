@@ -16,6 +16,8 @@ class TestKoQueryRouter(unittest.TestCase):
         self.assertGreaterEqual(float(result["confidence"]), 0.8)
         self.assertEqual(result["slots"].get("from"), "A")
         self.assertEqual(result["slots"].get("to"), "B")
+        self.assertEqual(result["slots"].get("from_xy"), (2.0, 9.0))
+        self.assertEqual(result["slots"].get("to_xy"), (9.0, 9.0))
         self.assertEqual(result["slots"].get("turtle"), "turtle1")
         self.assertTrue(result["preprocessing_block"])
 

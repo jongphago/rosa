@@ -23,6 +23,13 @@ POINT_ALIAS = {
     "D점": "D",
 }
 
+POINT_COORDS: Dict[str, Tuple[float, float]] = {
+    "A": (2.0, 9.0),
+    "B": (9.0, 9.0),
+    "C": (9.0, 2.0),
+    "D": (2.0, 2.0),
+}
+
 
 def _has_korean(text: str) -> bool:
     return bool(re.search(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", text))
@@ -57,6 +64,12 @@ def _extract_route_slots(query: str) -> Dict[str, Any]:
     m_turtle = re.search(r"(turtle\d+)", query, re.IGNORECASE)
     if m_turtle:
         slots["turtle"] = m_turtle.group(1).lower()
+    if slots.get("from") and slots.get("to"):
+        from_label = str(slots["from"]).upper()
+        to_label = str(slots["to"]).upper()
+        if from_label in POINT_COORDS and to_label in POINT_COORDS:
+            slots["from_xy"] = POINT_COORDS[from_label]
+            slots["to_xy"] = POINT_COORDS[to_label]
     return slots
 
 
@@ -101,6 +114,10 @@ def preprocess_korean_query(query: str) -> Dict[str, Any]:
             hint_lines.append(
                 f"Route slots: from_xy={route_slots['from_xy']} to_xy={route_slots['to_xy']}"
             )
+            if route_slots.get("from") and route_slots.get("to"):
+                hint_lines.append(
+                    "Point label mapping: A=(2.0,9.0), B=(9.0,9.0), C=(9.0,2.0), D=(2.0,2.0)"
+                )
         if route_slots.get("turtle"):
             hint_lines.append(f"Turtle slot: {route_slots['turtle']}")
 
