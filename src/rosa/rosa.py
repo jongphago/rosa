@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, AsyncIterable, Dict, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, AsyncIterable, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain.prompts import MessagesPlaceholder
@@ -93,6 +93,11 @@ class ROSA:
         streaming: bool = True,
         max_iterations: int = 100,
         return_intermediate_steps: bool = False,
+        # turtle_agent가 실행한 tool trace를 memory/command 로그에 남길 수 있도록,
+        # 비스트리밍 invoke() 경로에서도 intermediate step을 콜백으로 노출합니다.
+        on_intermediate_steps: Optional[
+            Callable[[List[Tuple[Any, str]]], None]
+        ] = None,
     ):
         self.__chat_history = []
         self.__ros_version = ros_version
@@ -102,12 +107,15 @@ class ROSA:
         self.__blacklist = blacklist if blacklist else []
         self.__accumulate_chat_history = accumulate_chat_history
         self.__streaming = streaming
+        self.__verbose = verbose
         self.__max_iterations = max_iterations
         self.__return_intermediate_steps = return_intermediate_steps
+        self.__on_intermediate_steps = on_intermediate_steps
         self.__tools = self._get_tools(
             ros_version, packages=tool_packages, tools=tools, blacklist=self.__blacklist
         )
         self.__prompts = self._get_prompts(prompts)
+        self.__active_tools = list(self.__tools.get_tools())
         self.__agent = self._get_agent()
         self.__executor = self._get_executor(verbose=verbose)
         # cache this check - no need to do isinstance on every invoke
@@ -130,6 +138,20 @@ class ROSA:
     def clear_chat(self):
         """Clear the chat history."""
         self.__chat_history = []
+
+    def get_configured_tools(self) -> List[Any]:
+        """Return the full configured tool list before per-query filtering."""
+        return list(self.__tools.get_tools())
+
+    def get_active_tools(self) -> List[Any]:
+        """Return the tool list currently exposed to the agent executor."""
+        return list(self.__active_tools)
+
+    def set_active_tools(self, tools: List[Any]) -> None:
+        """Replace the active tool list and rebuild the agent/executor."""
+        self.__active_tools = list(tools)
+        self.__agent = self._get_agent()
+        self.__executor = self._get_executor(verbose=self.__verbose)
 
     def invoke(self, query: str) -> str:
         """
@@ -163,6 +185,14 @@ class ROSA:
             raise
         except Exception as e:
             return f"An error occurred: {str(e)}"
+
+        if self.__on_intermediate_steps:
+            # 콜백 예외가 발생해도 사용자 응답 흐름을 막지 않도록 비치명 처리합니다.
+            steps = result.get("intermediate_steps") or []
+            try:
+                self.__on_intermediate_steps(steps)
+            except Exception as cb_err:
+                logger.warning("on_intermediate_steps callback failed: %s", cb_err)
 
         self._record_chat_history(query, result["output"])
         return result["output"]
@@ -257,7 +287,7 @@ class ROSA:
         """Create and return an executor for processing user inputs and generating responses."""
         executor = AgentExecutor(
             agent=self.__agent,
-            tools=self.__tools.get_tools(),
+            tools=self.__active_tools,
             stream_runnable=self.__streaming,
             verbose=verbose,
             max_iterations=self.__max_iterations,
@@ -270,7 +300,7 @@ class ROSA:
         """Create and return an agent for processing user inputs and generating responses."""
         agent = create_tool_calling_agent(
             llm=self.__llm,
-            tools=self.__tools.get_tools(),
+            tools=self.__active_tools,
             prompt=self.__prompts,
         )
         return agent
